@@ -55,13 +55,13 @@ elif [ "$input_arg" == "aarch64" ]; then
     curobo_docker:$input_arg
 
 elif [[ "$input_arg" == *isaac_sim* ]] ; then
-
+    echo "Running Isaac Sim docker"
 
     docker run --name container_$input_arg --entrypoint bash -it --gpus all -e "ACCEPT_EULA=Y" --rm --network=host \
         --privileged \
         -e "PRIVACY_CONSENT=Y" \
         -v $HOME/.Xauthority:/root/.Xauthority \
-        -e DISPLAY \
+        -e DISPLAY=$DISPLAY \
         -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \
         -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \
         -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \
@@ -70,6 +70,7 @@ elif [[ "$input_arg" == *isaac_sim* ]] ; then
         -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \
         -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \
         -v ~/docker/isaac-sim/documents:/root/Documents:rw \
+        -v ~/mpc_ws/planning_ws/curobo/examples:/root/curobo/examples \
         --volume /dev:/dev \
         curobo_docker:$input_arg
 
