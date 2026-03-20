@@ -56,13 +56,13 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--roll_amp_deg", type=float, default=10.0, help="Roll amplitude (deg)"
+    "--roll_amp_deg", type=float, default=7.0, help="Roll amplitude (deg)"
 )
 parser.add_argument(
-    "--pitch_amp_deg", type=float, default=10.0, help="Pitch amplitude (deg)"
+    "--pitch_amp_deg", type=float, default=7.0, help="Pitch amplitude (deg)"
 )
 parser.add_argument(
-    "--yaw_amp_deg", type=float, default=10.0, help="Yaw amplitude (deg)"
+    "--yaw_amp_deg", type=float, default=7.0, help="Yaw amplitude (deg)"
 )
 
 parser.add_argument(
@@ -268,11 +268,17 @@ def main():
 
     # stage.SetDefaultPrim(stage.GetPrimAtPath("/World"))
 
-    # Make a target to follow
+    # Make a target to follow.
+    target_x = 0.35
+    target_z = 0.5
+    target_y_left = -0.4
+    target_y_right = 0.4
+    target_repeat_interval_s = 20.0
+    target_orientation = np.array([0, 1, 0, 0], dtype=np.float32)
     target = cuboid.VisualCuboid(
         "/World/target",
-        position=np.array([0.5, 0, 0.5]),
-        orientation=np.array([0, 1, 0, 0]),
+        position=np.array([target_x, target_y_left, target_z], dtype=np.float32),
+        orientation=target_orientation,
         color=np.array([1.0, 0, 0]),
         size=0.05,
     )
@@ -280,16 +286,16 @@ def main():
     # Add a fixed spherical obstacle in the scene.
     sphere.VisualSphere(
         "/World/obstacle_sphere_0",
-        position=np.array([0.35, -0.25, 0.35]),
+        position=np.array([0.35, 0, 0.4]),
         orientation=np.array([1.0, 0.0, 0.0, 0.0]),
-        radius=0.08,
+        radius=0.2,
         color=np.array([0.0, 0.4, 1.0]),
     )
 
     sphere_obstacle = Sphere(
         name="obstacle_sphere_0",
-        radius=0.08,
-        pose=[0.35, -0.25, 0.35, 1.0, 0.0, 0.0, 0.0],
+        radius=0.2,
+        pose=[0.35, 0, 0.4, 1.0, 0.0, 0.0, 0.0],
         color=[0.0, 0.4, 1.0, 1.0],
     )
 
@@ -305,7 +311,7 @@ def main():
     tensor_args = TensorDeviceType()
 
     robot_cfg = load_yaml(join_path(get_robot_configs_path(), args.robot))["robot_cfg"]
-
+    print(f"Loaded robot config: {robot_cfg}")
     j_names = robot_cfg["kinematics"]["cspace"]["joint_names"]
     default_config = robot_cfg["kinematics"]["cspace"]["retract_config"]
     robot_cfg["kinematics"]["collision_sphere_buffer"] += 0.02
@@ -427,6 +433,17 @@ def main():
         step_index = my_world.current_time_step_index
         sim_time = step_index * 0.02
 
+        t_in_period = sim_time % target_repeat_interval_s
+        if t_in_period < target_repeat_interval_s / 2.0:
+            target_y = target_y_left
+        else:
+            target_y = target_y_right
+        
+        target.set_world_pose(
+            position=np.array([target_x, target_y, target_z], dtype=np.float32),
+            orientation=target_orientation,
+        )
+
         ship_pose_world = motion_profile.pose(sim_time)
         set_prim_transform(robot_root_prim, ship_pose_world.tolist())
 
@@ -445,24 +462,28 @@ def main():
             init_curobo = True
         step += 1
         step_index = step
-        if step_index % 1000 == 0:
-            print("Updating world")
-            obstacles = usd_help.get_obstacles_from_stage(
-                only_paths=["/World"],
-                ignore_substring=[
-                    robot_prim_path,
-                    "/World/target",
-                    "/World/defaultGroundPlane",
-                    "/curobo",
-                ],
-                reference_prim_path=robot_prim_path,
-            )
-            obstacles.add_obstacle(world_cfg_table.cuboid[0])
-            obstacles.add_obstacle(sphere_obstacle)
-            mpc.world_coll_checker.load_collision_model(obstacles)
+        print("Updating world")
+        obstacles = usd_help.get_obstacles_from_stage(
+            only_paths=["/World"],
+            ignore_substring=[
+                robot_prim_path,
+                "/World/target",
+                "/World/defaultGroundPlane",
+                "/curobo",
+            ],
+            reference_prim_path=robot_prim_path,
+        )
+        print(f"Found {len(obstacles)} obstacles in the scene for curobo.")
+        for obs in obstacles:
+            print(f"Obstacle: {obs.name}, type: {type(obs)}")
+            print(f"Obstacle pose: {obs.pose}")
+        
+        obstacles.add_obstacle(world_cfg_table.cuboid[0])
+        mpc.world_coll_checker.load_collision_model(obstacles)
 
         # position and orientation of target virtual cube:
         cube_position, cube_orientation = target.get_world_pose()
+        print(f"Target position: {cube_position}, orientation: {cube_orientation}")
         base_pos_world, base_quat_world = robot.get_world_pose()
         base_pose_world = np.array(
             [
