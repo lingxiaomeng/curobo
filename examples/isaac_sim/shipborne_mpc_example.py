@@ -56,10 +56,10 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--roll_amp_deg", type=float, default=7.0, help="Roll amplitude (deg)"
+    "--roll_amp_deg", type=float, default=10.0, help="Roll amplitude (deg)"
 )
 parser.add_argument(
-    "--pitch_amp_deg", type=float, default=7.0, help="Pitch amplitude (deg)"
+    "--pitch_amp_deg", type=float, default=10.0, help="Pitch amplitude (deg)"
 )
 parser.add_argument(
     "--yaw_amp_deg", type=float, default=7.0, help="Yaw amplitude (deg)"
@@ -88,8 +88,8 @@ parser.add_argument("--robot", type=str, default="franka.yml", help="robot confi
 parser.add_argument(
     "--mode",
     type=int,
-    default=1,
-    help="0: Moving base with static target/obstacle (base moves, target/obstacle fixed in base frame), "
+    default=0,
+    help="0: Moving base with static target/obstacle (base moves, target/obstacle fixed in world frame), "
          "1: Fixed base with moving obstacle (base fixed, obstacle moves in world frame), "
          "2: Fixed base with moving obstacle and target (both move in world frame)"
 )
@@ -103,7 +103,7 @@ print(f"Running in mode {args.mode}:")
 if args.mode == 0:
     print("  Mode 0: Moving base with static target/obstacle")
     print("  - Robot base moves with ship motion")
-    print("  - Target and obstacle are fixed in base frame")
+    print("  - Target and obstacle are fixed in world frame")
 elif args.mode == 1:
     print("  Mode 1: Fixed base with moving obstacle only")
     print("  - Robot base is fixed")
@@ -164,7 +164,7 @@ from helper import add_extensions, add_robot_to_scene
 
 # CuRobo
 # from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-from curobo.geom.sdf.world import CollisionCheckerType
+from curobo.geom.sdf.world import CollisionCheckerType, CollisionQueryBuffer
 from curobo.geom.types import Sphere, WorldConfig
 from curobo.rollout.rollout_base import Goal
 from curobo.types.base import TensorDeviceType
@@ -228,44 +228,6 @@ def euler_xyz_to_quaternion_wxyz(roll: float, pitch: float, yaw: float):
     return np.array([w, x, y, z], dtype=np.float32)
 
 
-def quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array(
-        [
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ],
-        dtype=np.float32,
-    )
-
-
-def quat_wxyz_conjugate(q: np.ndarray) -> np.ndarray:
-    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float32)
-
-
-def rotate_vec_by_quat_wxyz(v: np.ndarray, q: np.ndarray) -> np.ndarray:
-    q_v = np.array([0.0, v[0], v[1], v[2]], dtype=np.float32)
-    q_inv = quat_wxyz_conjugate(q)
-    q_out = quat_wxyz_multiply(quat_wxyz_multiply(q, q_v), q_inv)
-    return q_out[1:]
-
-
-def apply_inverse_base_motion_to_pose(
-    obj_pos_world: np.ndarray,
-    obj_quat_world: np.ndarray,
-    base_pose_world: np.ndarray,
-):
-    base_pos = base_pose_world[:3]
-    base_quat = base_pose_world[3:]
-    inv_base_quat = quat_wxyz_conjugate(base_quat)
-    rel_pos = rotate_vec_by_quat_wxyz(obj_pos_world - base_pos, inv_base_quat)
-    rel_quat = quat_wxyz_multiply(inv_base_quat, obj_quat_world)
-    return rel_pos.astype(np.float32), rel_quat.astype(np.float32)
-
-
 def make_pose(
     pos: np.ndarray, quat_wxyz: np.ndarray, tensor_args: TensorDeviceType
 ):
@@ -317,6 +279,47 @@ def draw_points(rollouts: torch.Tensor):
         colors += [(1.0 - (i + 1.0 / b), 0.3 * (i + 1.0 / b), 0.0, 0.1) for _ in range(h)]
     sizes = [10.0 for _ in range(b * h)]
     draw.draw_points(point_list, colors, sizes)
+
+
+def get_robot_obstacle_collision_metrics(mpc: MpcSolver, joint_state: JointState):
+    """Return distance-like and hard-constraint collision metrics.
+
+    collision_distance follows the same collision-cost pathway as collision_checker.py.
+    collision_constraint is the hard collision indicator (>0 means in collision).
+    """
+    kin_state = mpc.compute_kinematics(joint_state)
+    robot_spheres = kin_state.robot_spheres
+    if robot_spheres is None:
+        return 0.0, 0.0
+    if len(robot_spheres.shape) == 3:
+        robot_spheres = robot_spheres.unsqueeze(1)
+
+    # Match collision checker behavior with direct world collision queries.
+    coll_query_buffer = CollisionQueryBuffer()
+    coll_query_buffer.update_buffer_shape(
+        robot_spheres.shape, mpc.tensor_args, mpc.world_coll_checker.collision_types
+    )
+    unit_weight = robot_spheres.new_tensor([1.0])
+    zero_activation_distance = robot_spheres.new_tensor([0.0])
+
+    coll_distance = mpc.world_coll_checker.get_sphere_distance(
+        robot_spheres,
+        coll_query_buffer,
+        unit_weight,
+        zero_activation_distance,
+        env_query_idx=None,
+        return_loss=False,
+        sum_collisions=True,
+    )
+    coll_constraint = mpc.world_coll_checker.get_sphere_collision(
+        robot_spheres,
+        coll_query_buffer,
+        unit_weight,
+        zero_activation_distance,
+        env_query_idx=None,
+        return_loss=False,
+    )
+    return float(torch.max(coll_distance).item()), float(torch.max(coll_constraint).item())
 
 
 def main():
@@ -402,6 +405,7 @@ def main():
         mesh=world_cfg1.mesh,
         sphere=[sphere_obstacle],
     )
+    table_pose_world = np.array(world_cfg_table.cuboid[0].pose, dtype=np.float32)
 
     init_curobo = False
 
@@ -467,6 +471,8 @@ def main():
     cmd_state_full = None
     step = 0
     last_collision_time = None
+    collision_log_cooldown_s = 0.2
+    collision_constraint_threshold = 0.0
     collision_history = []
     
     # Store initial positions for modes with fixed base
@@ -493,6 +499,13 @@ def main():
         yaw_freq=args.yaw_freq,
         base_height=0.1,
     )
+
+    ship_pose_world_0 = motion_profile.pose(0.0)
+    T_world_ship_0 = make_pose(ship_pose_world_0[:3], ship_pose_world_0[3:], tensor_args)
+    T_world_obstacle_initial = make_pose(initial_obstacle_pos, initial_obstacle_quat, tensor_args)
+    T_ship0_obstacle = T_world_ship_0.inverse().multiply(T_world_obstacle_initial)
+
+    print("tensor_args device:", tensor_args)
     
     while simulation_app.is_running():
         if not init_world:
@@ -507,7 +520,7 @@ def main():
 
         step_index = my_world.current_time_step_index
         sim_time = step_index * 0.02
-        if sim_time > target_repeat_interval_s * 2.0:
+        if sim_time > target_repeat_interval_s * 3.0:
             break
 
         t_in_period = sim_time % target_repeat_interval_s
@@ -517,31 +530,43 @@ def main():
             target_y = target_y_right
         
         ship_pose_world = motion_profile.pose(sim_time)
-        moving_obstacle_pose = None
+        T_world_ship_motion = make_pose(ship_pose_world[:3], ship_pose_world[3:], tensor_args)
+
+        obstacle_pos_world = initial_obstacle_pos.copy()
+        obstacle_quat_world = initial_obstacle_quat.copy()
+
+        T_world_base = make_pose(
+            initial_robot_base_pos[:3], initial_robot_base_pos[3:], tensor_args
+        )
+
+        T_world_target = make_pose(
+            np.array([target_x, target_y, target_z], dtype=np.float32),
+            target_orientation,
+            tensor_args,
+        )
 
         # Apply mode-specific transformations
         if args.mode == 0:
-            # Mode 0: Moving base - target and obstacle fixed in base frame
+            # Mode 0: Moving base - target and obstacle fixed in world frame
             target.set_world_pose(
                 position=np.array([target_x, target_y, target_z], dtype=np.float32),
                 orientation=target_orientation,
             )
             set_prim_transform(robot_root_prim, ship_pose_world.tolist())
+            T_world_base = T_world_ship_motion
             
         elif args.mode == 1:
             # Mode 1: Fixed base - only obstacle moves in world frame
-            # Emulate relative motion from moving-base mode using inverse base transform.
-            obstacle_pos, obstacle_quat = apply_inverse_base_motion_to_pose(
-                initial_obstacle_pos,
-                initial_obstacle_quat,
-                ship_pose_world,
-            )
+            # Obstacle moves with ship motion offset from its initial position
+
+            T_world_obstacle_moving = T_world_ship_motion.multiply(T_ship0_obstacle)
+            obstacle_pos_world = T_world_obstacle_moving.position.cpu().numpy().flatten()
+            obstacle_quat_world = T_world_obstacle_moving.quaternion.cpu().numpy().flatten()
             # Update visual sphere
             visual_sphere.set_world_pose(
-                position=obstacle_pos,
-                orientation=obstacle_quat,
+                position=   obstacle_pos_world,
+                orientation=obstacle_quat_world,
             )
-            moving_obstacle_pose = (obstacle_pos, obstacle_quat)
             # Keep robot base fixed
             set_prim_transform(robot_root_prim, initial_robot_base_pos.tolist())
             # Target stays at initial position
@@ -552,28 +577,23 @@ def main():
             
         elif args.mode == 2:
             # Mode 2: Fixed base - both obstacle and target move in world frame
-            # Move obstacle
-            obstacle_pos, obstacle_quat = apply_inverse_base_motion_to_pose(
-                initial_obstacle_pos,
-                initial_obstacle_quat,
-                ship_pose_world,
-            )
+            # Both move with ship motion offset from their initial positions
+            T_world_obstacle_moving = T_world_ship_motion.multiply(T_ship0_obstacle)
+            obstacle_pos_world = T_world_obstacle_moving.position.cpu().numpy().flatten()
+            obstacle_quat_world = T_world_obstacle_moving.quaternion.cpu().numpy().flatten()
             visual_sphere.set_world_pose(
-                position=obstacle_pos,
-                orientation=obstacle_quat,
+                position=   obstacle_pos_world,
+                orientation=obstacle_quat_world,
             )
-            moving_obstacle_pose = (obstacle_pos, obstacle_quat)
             
-            # Move target with the same inverse-base transform from moving-base mode.
-            raw_target_pos = np.array([target_x, target_y, target_z], dtype=np.float32)
-            target_pos, target_quat = apply_inverse_base_motion_to_pose(
-                raw_target_pos,
-                initial_target_quat,
-                ship_pose_world,
-            )
+            # Move target with the same motion
+            T_ship0_target = T_world_ship_0.inverse().multiply(T_world_target)
+            T_world_target_moving = T_world_ship_motion.multiply(T_ship0_target)
+            target_pos_world = T_world_target_moving.position.cpu().numpy().flatten()
+            target_quat_world = T_world_target_moving.quaternion.cpu().numpy().flatten()
             target.set_world_pose(
-                position=target_pos,
-                orientation=target_quat,
+                position=target_pos_world,
+                orientation=target_quat_world,
             )
             # Keep robot base fixed
             set_prim_transform(robot_root_prim, initial_robot_base_pos.tolist())
@@ -600,6 +620,7 @@ def main():
             ignore_substring=[
                 robot_prim_path,
                 "/World/target",
+                "/World/obstacle_sphere_0",
                 "/World/defaultGroundPlane",
                 "/curobo",
             ],
@@ -609,54 +630,52 @@ def main():
         # for obs in obstacles:
         #     print(f"Obstacle: {obs.name}, type: {type(obs)}")
         #     print(f"Obstacle pose: {obs.pose}")
-        
+
+        # Use the visual obstacle pose as the collision source of truth.
+        obstacle_pos_world_vis, obstacle_quat_world_vis = visual_sphere.get_world_pose()
+        T_world_obstacle = make_pose(obstacle_pos_world_vis, obstacle_quat_world_vis, tensor_args)
+        T_ship_obstacle = T_world_base.inverse().multiply(T_world_obstacle)
+        obstacle_pos = T_ship_obstacle.position.cpu().numpy().flatten()
+        obstacle_quat = T_ship_obstacle.quaternion.cpu().numpy().flatten()
+
+        # Sanity check: transformed obstacle should map back to visual world pose.
+        if step_index % 200 == 0:
+            T_world_obstacle_reconstructed = T_world_base.multiply(T_ship_obstacle)
+            obstacle_pos_reconstructed = (
+                T_world_obstacle_reconstructed.position.cpu().numpy().flatten()
+            )
+            align_err = float(
+                np.linalg.norm(obstacle_pos_reconstructed - np.asarray(obstacle_pos_world_vis))
+            )
+            print(f"[ALIGN] obstacle world pose error: {align_err:.6e} m")
+
+        sphere_obstacle.pose = np.concatenate([obstacle_pos, obstacle_quat]).tolist()
+        obstacles.add_obstacle(sphere_obstacle)
+
+        # Keep manually-added table obstacle in the same base frame as robot and goal.
+        T_world_table = make_pose(table_pose_world[:3], table_pose_world[3:], tensor_args)
+        T_ship_table = T_world_base.inverse().multiply(T_world_table)
+        world_cfg_table.cuboid[0].pose = np.concatenate(
+            [
+                T_ship_table.position.cpu().numpy().flatten(),
+                T_ship_table.quaternion.cpu().numpy().flatten(),
+            ]
+        ).tolist()
         obstacles.add_obstacle(world_cfg_table.cuboid[0])
-        
-        # For modes with moving obstacles, update the sphere obstacle
-        if moving_obstacle_pose is not None:
-            obstacle_pos, obstacle_quat = moving_obstacle_pose
-            sphere_obstacle.pose = obstacle_pos.tolist() + obstacle_quat.tolist()
-            # Replace sphere obstacle with updated pose
-            obstacles.sphere[0] = sphere_obstacle
-        
-        mpc.world_coll_checker.load_collision_model(obstacles)
+
+        # Convert spheres/capsules/cylinders into collision-supported primitives/meshes.
+        collision_world = obstacles.get_collision_check_world(mesh_process=False)
+        mpc.world_coll_checker.load_collision_model(collision_world)
 
         # position and orientation of target virtual cube:
         cube_position, cube_orientation = target.get_world_pose()
         print(f"Target position: {cube_position}, orientation: {cube_orientation}")
-        base_pos_world, base_quat_world = robot.get_world_pose()
-        base_pose_world = np.array(
-            [
-                base_pos_world[0],
-                base_pos_world[1],
-                base_pos_world[2],
-                base_quat_world[0],
-                base_quat_world[1],
-                base_quat_world[2],
-                base_quat_world[3],
-            ],
-            dtype=np.float32,
-        )
         
-        if args.mode == 0:
-            # Mode 0: Moving base - convert target pose from world to base frame
-            goal_pose_ship = world_to_base_goal(
-                cube_position,
-                cube_orientation,
-                base_pose_world,
-                tensor_args,
-            )
-        else:
-            # Modes 1 & 2: Fixed base - target is already in world frame
-            # Since base is at origin with identity orientation, goal pose in base frame = world pose
-            goal_pose_ship = make_pose(
-                cube_position,
-                cube_orientation,
-                tensor_args,
-            )
+        T_world_target = make_pose(cube_position, cube_orientation, tensor_args)
+        T_ship_target = T_world_base.inverse().multiply(T_world_target)
 
 
-        goal_buffer.goal_pose.copy_(goal_pose_ship)
+        goal_buffer.goal_pose.copy_(T_ship_target)
         mpc.update_goal(goal_buffer)
 
         # if not changed don't call curobo:
@@ -689,30 +708,33 @@ def main():
         common_js_names = []
         current_state.copy_(cu_js)
 
+        collision_distance, collision_constraint = get_robot_obstacle_collision_metrics(
+            mpc, current_state
+        )
+        if collision_constraint > collision_constraint_threshold:
+            if (
+                last_collision_time is None
+                or (sim_time - last_collision_time) >= collision_log_cooldown_s
+            ):
+                collision_event = {
+                    "time": sim_time,
+                    "step": int(step_index),
+                    "collision_distance": collision_distance,
+                    "collision_constraint": collision_constraint,
+                }
+                collision_history.append(collision_event)
+                last_collision_time = sim_time
+                print(
+                    "[COLLISION] "
+                    f"t={sim_time:.3f}s, step={int(step_index)}, "
+                    f"distance={collision_distance:.6f}, "
+                    f"constraint={collision_constraint:.6f}"
+                )
+
         mpc_result = mpc.step(current_state, max_attempts=2)
         # ik_result = ik_solver.solve_single(ik_goal, cu_js.position.view(1,-1), cu_js.position.view(1,1,-1))
 
-        # Check for collisions
-        try:
-            collision_result = mpc.world_coll_checker.check_collision(cu_js.position.unsqueeze(0))
-            is_in_collision = collision_result.item() if hasattr(collision_result, 'item') else collision_result
-            
-            if is_in_collision:
-                if last_collision_time != sim_time:
-                    last_collision_time = sim_time
-                    collision_history.append({
-                        'time': sim_time,
-                        'step': step_index,
-                        'position': cu_js.position.cpu().numpy()
-                    })
-                    print(f"[COLLISION DETECTED] Contact time: {sim_time:.4f}s (Step: {step_index})")
-                    print(f"  Robot position: {cu_js.position.cpu().numpy()}")
-            else:
-                if last_collision_time is not None:
-                    print(f"[COLLISION CLEARED] At time: {sim_time:.4f}s (Step: {step_index})")
-                    last_collision_time = None
-        except Exception as e:
-            pass  # Collision checker may not be available
+
 
         succ = True  # ik_result.success.item()
         cmd_state_full = mpc_result.js_action
@@ -758,7 +780,12 @@ if __name__ == "__main__":
         print("="*60)
         print(f"Total collisions detected: {len(collision_history)}")
         for i, collision in enumerate(collision_history, 1):
-            print(f"{i}. Time: {collision['time']:.4f}s (Step: {collision['step']})")
+            print(
+                f"{i}. Time: {collision['time']:.4f}s "
+                f"(Step: {collision['step']}), "
+                f"Distance: {collision['collision_distance']:.6f}, "
+                f"Constraint: {collision['collision_constraint']:.6f}"
+            )
         print("="*60 + "\n")
     else:
         print("\nNo collisions detected during simulation.")
