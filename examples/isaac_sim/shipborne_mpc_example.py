@@ -105,9 +105,9 @@ if args.mode == 0:
     print("  - Robot base moves with ship motion")
     print("  - Target and obstacle are fixed in world frame")
 elif args.mode == 1:
-    print("  Mode 1: Fixed base with moving obstacle only")
+    print("  Mode 1: Fixed base with fixed obstacle only")
     print("  - Robot base is fixed")
-    print("  - Obstacle moves in world frame with ship motion")
+    print("  - Obstacle is fixed in world frame")
     print("  - Target is static in world frame")
 elif args.mode == 2:
     print("  Mode 2: Fixed base with moving obstacle and target")
@@ -322,7 +322,10 @@ def get_robot_obstacle_collision_metrics(mpc: MpcSolver, joint_state: JointState
     return float(torch.max(coll_distance).item()), float(torch.max(coll_constraint).item())
 
 
+
 def main():
+    total_steps = 0
+
     # assuming obstacles are in objects_path:
     my_world = World(stage_units_in_meters=1.0)
     stage = my_world.stage
@@ -471,7 +474,6 @@ def main():
     cmd_state_full = None
     step = 0
     last_collision_time = None
-    collision_log_cooldown_s = 0.2
     collision_constraint_threshold = 0.0
     collision_history = []
     
@@ -518,7 +520,11 @@ def main():
         if not my_world.is_playing():
             continue
 
+
+        
         step_index = my_world.current_time_step_index
+
+        total_steps += 1
         sim_time = step_index * 0.02
         if sim_time > target_repeat_interval_s * 3.0:
             break
@@ -556,10 +562,9 @@ def main():
             T_world_base = T_world_ship_motion
             
         elif args.mode == 1:
-            # Mode 1: Fixed base - only obstacle moves in world frame
-            # Obstacle moves with ship motion offset from its initial position
+            # Mode 1: Fixed base and fixed obstacle - target is static in world frame
 
-            T_world_obstacle_moving = T_world_ship_motion.multiply(T_ship0_obstacle)
+            T_world_obstacle_moving = T_ship0_obstacle # No ship motion applied to obstacle, it stays fixed in world frame
             obstacle_pos_world = T_world_obstacle_moving.position.cpu().numpy().flatten()
             obstacle_quat_world = T_world_obstacle_moving.quaternion.cpu().numpy().flatten()
             # Update visual sphere
@@ -712,24 +717,20 @@ def main():
             mpc, current_state
         )
         if collision_constraint > collision_constraint_threshold:
-            if (
-                last_collision_time is None
-                or (sim_time - last_collision_time) >= collision_log_cooldown_s
-            ):
-                collision_event = {
-                    "time": sim_time,
-                    "step": int(step_index),
-                    "collision_distance": collision_distance,
-                    "collision_constraint": collision_constraint,
-                }
-                collision_history.append(collision_event)
-                last_collision_time = sim_time
-                print(
-                    "[COLLISION] "
-                    f"t={sim_time:.3f}s, step={int(step_index)}, "
-                    f"distance={collision_distance:.6f}, "
-                    f"constraint={collision_constraint:.6f}"
-                )
+            collision_event = {
+                "time": sim_time,
+                "step": int(step_index),
+                "collision_distance": collision_distance,
+                "collision_constraint": collision_constraint,
+            }
+            collision_history.append(collision_event)
+            last_collision_time = sim_time
+            print(
+                "[COLLISION] "
+                f"t={sim_time:.3f}s, step={int(step_index)}, "
+                f"distance={collision_distance:.6f}, "
+                f"constraint={collision_constraint:.6f}"
+            )
 
         mpc_result = mpc.step(current_state, max_attempts=2)
         # ik_result = ik_solver.solve_single(ik_goal, cu_js.position.view(1,-1), cu_js.position.view(1,1,-1))
@@ -765,20 +766,20 @@ def main():
         else:
             carb.log_warn("No action is being taken.")
     
-    return collision_history
+    return collision_history, total_steps
 
 
 ############################################################
 
 if __name__ == "__main__":
-    collision_history = main()
+    collision_history, total_steps = main()
     
     # Print collision summary
     if collision_history:
         print("\n" + "="*60)
         print("COLLISION SUMMARY")
         print("="*60)
-        print(f"Total collisions detected: {len(collision_history)}")
+
         for i, collision in enumerate(collision_history, 1):
             print(
                 f"{i}. Time: {collision['time']:.4f}s "
@@ -786,6 +787,9 @@ if __name__ == "__main__":
                 f"Distance: {collision['collision_distance']:.6f}, "
                 f"Constraint: {collision['collision_constraint']:.6f}"
             )
+        print(f"Total collisions detected: {len(collision_history)}")
+        print(f"Total steps simulated: {total_steps}")
+        print(f"Collision rate: {len(collision_history) / total_steps:.4f} collisions/step")
         print("="*60 + "\n")
     else:
         print("\nNo collisions detected during simulation.")
