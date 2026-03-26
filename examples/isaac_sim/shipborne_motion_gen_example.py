@@ -333,11 +333,31 @@ def main():
         enable_finetune_trajopt=enable_finetune_trajopt,
         time_dilation_factor=1.0,
     )
+    plan_config_recovery = MotionGenPlanConfig(
+        enable_graph=True,
+        enable_graph_attempt=4,
+        max_attempts=max(4, max_attempts),
+        enable_finetune_trajopt=False,
+        time_dilation_factor=1.0,
+    )
+    plan_config_retract = MotionGenPlanConfig(
+        enable_graph=False,
+        max_attempts=2,
+        enable_finetune_trajopt=False,
+        time_dilation_factor=1.0,
+    )
+    retract_cfg = motion_gen.get_retract_config().view(1, -1)
+    retract_state = JointState.from_position(
+        retract_cfg,
+        joint_names=motion_gen.kinematics.joint_names,
+    )
 
     usd_help.load_stage(my_world.stage)
     init_world = False
 
     plan_success_count = 0
+    recovery_success_count = 0
+    retract_success_count = 0
     plan_fail_count = 0
     collision_constraint_threshold = 0.0
     collision_history = []
@@ -557,13 +577,32 @@ def main():
             )
             next_replan_step = step_index + adaptive_replan_steps
 
-            if not result.success.item():
+            solve_result = result
+            if not solve_result.success.item():
+                solve_result = motion_gen.plan_single(
+                    cu_js.unsqueeze(0),
+                    T_ship_target,
+                    plan_config_recovery,
+                )
+                if solve_result.success.item():
+                    recovery_success_count += 1
+
+            if not solve_result.success.item():
+                solve_result = motion_gen.plan_single_js(
+                    cu_js.unsqueeze(0),
+                    retract_state,
+                    plan_config_retract,
+                )
+                if solve_result.success.item():
+                    retract_success_count += 1
+
+            if not solve_result.success.item():
                 plan_fail_count += 1
-                carb.log_warn("MotionGen failed to converge: " + str(result.status))
+                carb.log_warn("MotionGen planning failed (all stages): " + str(solve_result.status))
             else:
                 plan_success_count += 1
 
-                cmd_plan = result.get_interpolated_plan()
+                cmd_plan = solve_result.get_interpolated_plan()
                 cmd_plan = motion_gen.get_full_js(cmd_plan)
 
                 common_js_names = []
@@ -592,17 +631,33 @@ def main():
                 cmd_plan = None
                 past_cmd = None
 
-    return total_steps, plan_success_count, plan_fail_count, collision_history
+    return (
+        total_steps,
+        plan_success_count,
+        recovery_success_count,
+        retract_success_count,
+        plan_fail_count,
+        collision_history,
+    )
 
 
 if __name__ == "__main__":
-    total_steps, plan_success_count, plan_fail_count, collision_history = main()
+    (
+        total_steps,
+        plan_success_count,
+        recovery_success_count,
+        retract_success_count,
+        plan_fail_count,
+        collision_history,
+    ) = main()
 
     print("\n" + "=" * 60)
     print("MOTIONGEN SHIPBORNE SUMMARY")
     print("=" * 60)
     print(f"Total steps simulated: {total_steps}")
     print(f"Successful replans: {plan_success_count}")
+    print(f"Recovery replans (stage 2): {recovery_success_count}")
+    print(f"Retract replans (stage 3): {retract_success_count}")
     print(f"Failed replans: {plan_fail_count}")
     if total_steps > 0:
         print(f"Success ratio: {plan_success_count / total_steps:.4f} plans/step")
