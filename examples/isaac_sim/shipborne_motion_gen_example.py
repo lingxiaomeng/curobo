@@ -358,6 +358,7 @@ def main():
     plan_success_count = 0
     recovery_success_count = 0
     retract_success_count = 0
+    non_success_plan_count = 0
     plan_fail_count = 0
     collision_constraint_threshold = 0.0
     collision_history = []
@@ -596,15 +597,25 @@ def main():
                 if solve_result.success.item():
                     retract_success_count += 1
 
-            if not solve_result.success.item():
-                plan_fail_count += 1
-                carb.log_warn("MotionGen planning failed (all stages): " + str(solve_result.status))
-            else:
-                plan_success_count += 1
+            # Even if success=False, try extracting a candidate plan and execute it if non-empty.
+            candidate_cmd_plan = None
+            try:
+                candidate_cmd_plan = solve_result.get_interpolated_plan()
+                candidate_cmd_plan = motion_gen.get_full_js(candidate_cmd_plan)
+            except Exception as e:
+                carb.log_warn("Failed to extract interpolated plan: " + str(e))
 
-                cmd_plan = solve_result.get_interpolated_plan()
-                cmd_plan = motion_gen.get_full_js(cmd_plan)
+            if candidate_cmd_plan is not None and len(candidate_cmd_plan.position) > 0:
+                if solve_result.success.item():
+                    plan_success_count += 1
+                else:
+                    non_success_plan_count += 1
+                    carb.log_warn(
+                        "MotionGen returned success=False, executing high-cost candidate trajectory: "
+                        + str(solve_result.status)
+                    )
 
+                cmd_plan = candidate_cmd_plan
                 common_js_names = []
                 idx_list = []
                 for joint_name in sim_js_names:
@@ -613,6 +624,9 @@ def main():
                         common_js_names.append(joint_name)
                 cmd_plan = cmd_plan.get_ordered_joint_state(common_js_names)
                 cmd_idx = 1 if len(cmd_plan.position) > 1 else 0
+            else:
+                plan_fail_count += 1
+                carb.log_warn("MotionGen planning failed (no executable trajectory): " + str(solve_result.status))
 
         if cmd_plan is not None and len(cmd_plan.position) > 0:
             cmd_state = cmd_plan[cmd_idx]
@@ -636,6 +650,7 @@ def main():
         plan_success_count,
         recovery_success_count,
         retract_success_count,
+        non_success_plan_count,
         plan_fail_count,
         collision_history,
     )
@@ -647,6 +662,7 @@ if __name__ == "__main__":
         plan_success_count,
         recovery_success_count,
         retract_success_count,
+        non_success_plan_count,
         plan_fail_count,
         collision_history,
     ) = main()
@@ -658,6 +674,7 @@ if __name__ == "__main__":
     print(f"Successful replans: {plan_success_count}")
     print(f"Recovery replans (stage 2): {recovery_success_count}")
     print(f"Retract replans (stage 3): {retract_success_count}")
+    print(f"Executed non-success plans: {non_success_plan_count}")
     print(f"Failed replans: {plan_fail_count}")
     if total_steps > 0:
         print(f"Success ratio: {plan_success_count / total_steps:.4f} plans/step")
