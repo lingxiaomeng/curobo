@@ -259,6 +259,12 @@ class IKSolver:
     def update_links_inertial(self, link_properties):
         return self.core.update_links_inertial(link_properties)
 
+    def set_base_motion(self, base_velocity=None, base_acceleration=None):
+        return self.core.set_base_motion(base_velocity, base_acceleration)
+
+    def clear_base_motion(self):
+        return self.core.clear_base_motion()
+
     def debug_dump(self, file_path: str):
         return self.core.debug_dump(file_path)
 

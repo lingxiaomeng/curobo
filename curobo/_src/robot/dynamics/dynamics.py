@@ -79,6 +79,9 @@ class Dynamics:
         self._joint_reorder_indices = None
 
         self._gravity_spatial = config.get_gravity_spatial()
+        self._base_velocity_spatial = None
+        self._base_acceleration_spatial = None
+        self._base_motion_expanded_cache = {}
 
         kp = config.kinematics_config
         self._fixed_transforms = kp.fixed_transforms
@@ -138,6 +141,130 @@ class Dynamics:
             f"n_levels={self._n_levels}, tpb={self._threads_per_batch}"
         )
 
+    def set_base_motion(
+        self,
+        base_velocity: Optional[Union[torch.Tensor, list, tuple]] = None,
+        base_acceleration: Optional[Union[torch.Tensor, list, tuple]] = None,
+    ) -> None:
+        """Set optional root/base motion used by the CUDA RNEA kernels.
+
+        Args:
+            base_velocity: Optional spatial velocity in [angular(3), linear(3)]
+                order. Accepted shapes are [6], [horizon, 6], [batch, horizon, 6],
+                or an already-flattened [batch * horizon, 6].
+            base_acceleration: Optional spatial acceleration offset in
+                [angular(3), linear(3)] order. The CUDA kernel adds this to the
+                configured gravity spatial acceleration.
+        """
+        self._base_velocity_spatial = self._to_base_motion_tensor(base_velocity)
+        self._base_acceleration_spatial = self._to_base_motion_tensor(base_acceleration)
+        self._base_motion_expanded_cache = {}
+
+    def clear_base_motion(self) -> None:
+        """Clear optional root/base motion and use the fixed-base gravity model."""
+        self._base_velocity_spatial = None
+        self._base_acceleration_spatial = None
+        self._base_motion_expanded_cache = {}
+
+    def _to_base_motion_tensor(
+        self, value: Optional[Union[torch.Tensor, list, tuple]]
+    ) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        if not isinstance(value, torch.Tensor):
+            value = torch.as_tensor(value, dtype=torch.float32)
+        value = value.to(device=self._gravity_spatial.device, dtype=torch.float32)
+        if value.shape[-1] != 6:
+            log_and_raise(
+                "Base motion tensors must have last dimension 6 in "
+                "[angular(3), linear(3)] order"
+            )
+        if value.dim() not in (1, 2, 3):
+            log_and_raise(
+                "Base motion tensors must have shape [6], [N, 6], or [B, H, 6]"
+            )
+        return value.contiguous()
+
+    def _expand_base_motion_tensor(
+        self,
+        value: Optional[torch.Tensor],
+        original_shape: torch.Size,
+        actual_batch: int,
+    ) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+
+        cache_key = (value.data_ptr(), tuple(original_shape), actual_batch)
+        cached = self._base_motion_expanded_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if value.dim() == 1:
+            expanded = value.view(1, 6).expand(actual_batch, 6).contiguous()
+            self._base_motion_expanded_cache[cache_key] = expanded
+            return expanded
+
+        if value.dim() == 2:
+            if value.shape[0] == actual_batch:
+                expanded = value.contiguous()
+                self._base_motion_expanded_cache[cache_key] = expanded
+                return expanded
+            if value.shape[0] == 1:
+                expanded = value.expand(actual_batch, 6).contiguous()
+                self._base_motion_expanded_cache[cache_key] = expanded
+                return expanded
+            if len(original_shape) >= 3:
+                batch_size = original_shape[0]
+                horizon = original_shape[1]
+                if value.shape[0] < horizon:
+                    pad = value[-1:].expand(horizon - value.shape[0], 6)
+                    value_h = torch.cat((value, pad), dim=0)
+                else:
+                    value_h = value[:horizon]
+                expanded = (
+                    value_h
+                    .view(1, horizon, 6)
+                    .expand(batch_size, horizon, 6)
+                    .reshape(actual_batch, 6)
+                    .contiguous()
+                )
+                self._base_motion_expanded_cache[cache_key] = expanded
+                return expanded
+            if actual_batch == 1:
+                expanded = value[:1].contiguous()
+                self._base_motion_expanded_cache[cache_key] = expanded
+                return expanded
+            log_and_raise(
+                f"Base motion shape {tuple(value.shape)} cannot be broadcast to "
+                f"state shape {tuple(original_shape)}"
+            )
+
+        if len(original_shape) < 3:
+            if actual_batch == 1:
+                expanded = value.reshape(-1, 6)[:1].contiguous()
+                self._base_motion_expanded_cache[cache_key] = expanded
+                return expanded
+            log_and_raise(
+                f"Base motion shape {tuple(value.shape)} requires a trajectory state shape"
+            )
+
+        batch_size = original_shape[0]
+        horizon = original_shape[1]
+        if value.shape[0] not in (1, batch_size):
+            log_and_raise(
+                f"Base motion batch {value.shape[0]} cannot broadcast to {batch_size}"
+            )
+        if value.shape[1] < horizon:
+            pad = value[:, -1:, :].expand(value.shape[0], horizon - value.shape[1], 6)
+            value_h = torch.cat((value, pad), dim=1)
+        else:
+            value_h = value[:, :horizon, :]
+        if value_h.shape[0] == 1:
+            value_h = value_h.expand(batch_size, horizon, 6)
+        expanded = value_h.reshape(actual_batch, 6).contiguous()
+        self._base_motion_expanded_cache[cache_key] = expanded
+        return expanded
+
     def compute_inverse_dynamics(
         self,
         joint_state: JointState,
@@ -177,6 +304,12 @@ class Dynamics:
         _check_dyn(q.device, q=q, qd=qd, qdd=qdd)
 
         actual_batch = q.shape[0]
+        base_velocity = self._expand_base_motion_tensor(
+            self._base_velocity_spatial, original_shape, actual_batch
+        )
+        base_acceleration = self._expand_base_motion_tensor(
+            self._base_acceleration_spatial, original_shape, actual_batch
+        )
 
         f_ext_flat = None
         if f_ext is not None:
@@ -238,6 +371,8 @@ class Dynamics:
             self._link_map,
             self._joint_offset_map,
             self._gravity_spatial,
+            base_velocity,
+            base_acceleration,
             self._level_starts,
             self._level_links,
             self._n_links,

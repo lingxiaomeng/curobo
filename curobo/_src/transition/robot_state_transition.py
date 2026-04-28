@@ -51,6 +51,7 @@ class RobotStateTransition:
         # update cspace to store joint names in the order given by robot model:
         self.num_dof = self.robot_model.get_dof()
         self.robot_dynamics = None
+        self._compute_inverse_dynamics_enabled = True
         self._transition_streams = {}
         self._transition_events = {}
         if self.config.robot_config.dynamics is not None:
@@ -603,7 +604,11 @@ class RobotStateTransition:
 
     @property
     def compute_inverse_dynamics(self):
-        return self.robot_dynamics is not None
+        return self.robot_dynamics is not None and self._compute_inverse_dynamics_enabled
+
+    def set_inverse_dynamics_enabled(self, enabled: bool) -> None:
+        """Enable or disable inverse-dynamics evaluation for this transition."""
+        self._compute_inverse_dynamics_enabled = bool(enabled)
 
     def get_state_bounds(self):
         joint_limits = self.robot_model.get_joint_limits()
@@ -710,6 +715,28 @@ class RobotStateTransition:
             log_and_raise(
                 "Cannot update link inertial properties without inverse dynamics (robot_config.dynamics is None)"
             )
+
+    def set_base_motion(
+        self,
+        base_velocity: Optional[Union[torch.Tensor, list, tuple]] = None,
+        base_acceleration: Optional[Union[torch.Tensor, list, tuple]] = None,
+    ) -> None:
+        """Set optional root/base motion for inverse dynamics.
+
+        Tensors use spatial [angular(3), linear(3)] order and are consumed by
+        the CUDA RNEA model during rollout cost evaluation.
+        """
+        if self.robot_dynamics is not None:
+            self.robot_dynamics.set_base_motion(base_velocity, base_acceleration)
+        else:
+            log_and_raise(
+                "Cannot set base motion without inverse dynamics (robot_config.dynamics is None)"
+            )
+
+    def clear_base_motion(self) -> None:
+        """Clear root/base motion override on the inverse dynamics model."""
+        if self.robot_dynamics is not None:
+            self.robot_dynamics.clear_base_motion()
 
     @profiler.record_function("RobotStateTransition/get_full_dof_from_solution")
     def get_full_dof_from_solution(self, q_js: JointState) -> JointState:

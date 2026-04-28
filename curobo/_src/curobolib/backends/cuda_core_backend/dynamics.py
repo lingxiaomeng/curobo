@@ -34,6 +34,8 @@ def launch_rnea_forward(
     link_map: torch.Tensor,
     joint_offset_map: torch.Tensor,
     gravity: torch.Tensor,
+    base_velocity: Optional[torch.Tensor],
+    base_acceleration: Optional[torch.Tensor],
     level_starts: torch.Tensor,
     level_links: torch.Tensor,
     forward_cache: torch.Tensor,
@@ -62,6 +64,10 @@ def launch_rnea_forward(
         link_map: [num_links] Parent link index (int16).
         joint_offset_map: [num_links * 2] Mimic joint [multiplier, offset] pairs.
         gravity: [6] Spatial gravity vector.
+        base_velocity: [batch_size, 6] optional root spatial velocity in
+               [angular(3), linear(3)] order.
+        base_acceleration: [batch_size, 6] optional root spatial acceleration
+               offset in [angular(3), linear(3)] order. Added to ``gravity``.
         level_starts: [n_levels + 1] CSR offsets for tree-level grouping (int16).
         level_links: [num_links] Link indices sorted by tree level (int16).
         forward_cache: [batch_size, num_links, 20] Cache for backward reuse.
@@ -106,6 +112,10 @@ def launch_rnea_forward(
 
     # f_ext pointer: use actual pointer if provided, else 0 (nullptr)
     f_ext_ptr = f_ext.data_ptr() if has_f_ext else 0
+    base_velocity_ptr = base_velocity.data_ptr() if base_velocity is not None else 0
+    base_acceleration_ptr = (
+        base_acceleration.data_ptr() if base_acceleration is not None else 0
+    )
 
     kernel_args = (
         tau.data_ptr(),
@@ -123,6 +133,8 @@ def launch_rnea_forward(
         level_starts.data_ptr(),
         level_links.data_ptr(),
         forward_cache.data_ptr(),
+        base_velocity_ptr,
+        base_acceleration_ptr,
         f_ext_ptr,
         batch_size,
         n_levels,
@@ -146,6 +158,8 @@ def launch_rnea_backward(
     link_map: torch.Tensor,
     joint_offset_map: torch.Tensor,
     gravity: torch.Tensor,
+    base_velocity: Optional[torch.Tensor],
+    base_acceleration: Optional[torch.Tensor],
     level_starts: torch.Tensor,
     level_links: torch.Tensor,
     forward_cache: torch.Tensor,
@@ -179,6 +193,10 @@ def launch_rnea_backward(
         link_map: [num_links] Parent link index (int16).
         joint_offset_map: [num_links * 2] Mimic joint [multiplier, offset] pairs.
         gravity: [6] Spatial gravity vector.
+        base_velocity: [batch_size, 6] optional root spatial velocity in
+               [angular(3), linear(3)] order.
+        base_acceleration: [batch_size, 6] optional root spatial acceleration
+               offset in [angular(3), linear(3)] order. Added to ``gravity``.
         level_starts: [n_levels + 1] CSR offsets for tree-level grouping (int16).
         level_links: [num_links] Link indices sorted by tree level (int16).
         forward_cache: [batch_size, num_links, 20] Cached forward intermediates.
@@ -222,6 +240,10 @@ def launch_rnea_backward(
 
     # grad_f_ext pointer: use actual pointer if provided, else 0 (nullptr)
     grad_f_ext_ptr = grad_f_ext.data_ptr() if has_f_ext else 0
+    base_velocity_ptr = base_velocity.data_ptr() if base_velocity is not None else 0
+    base_acceleration_ptr = (
+        base_acceleration.data_ptr() if base_acceleration is not None else 0
+    )
 
     kernel_args = (
         grad_q.data_ptr(),
@@ -239,6 +261,8 @@ def launch_rnea_backward(
         link_map.data_ptr(),
         joint_offset_map.data_ptr(),
         gravity.data_ptr(),
+        base_velocity_ptr,
+        base_acceleration_ptr,
         level_starts.data_ptr(),
         level_links.data_ptr(),
         forward_cache.data_ptr(),

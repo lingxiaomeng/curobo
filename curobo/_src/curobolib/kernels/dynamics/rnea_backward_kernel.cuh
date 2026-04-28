@@ -78,6 +78,8 @@ __global__ void rnea_backward_kernel(
     const int16_t * __restrict__ link_map,
     const float * __restrict__ joint_offset_map,
     const float * __restrict__ gravity,
+    const float * __restrict__ base_velocity,
+    const float * __restrict__ base_acceleration,
     const int16_t * __restrict__ level_starts,
     const int16_t * __restrict__ level_links,
     const float * __restrict__ forward_cache,
@@ -407,10 +409,20 @@ __global__ void rnea_backward_kernel(
                 } else {
                     if (j_type != FIXED && j_idx >= 0) {
                         const int s_idx = get_s_index(j_type);
-                        float Xa_grav[6];
-                        spatial_Xv(R, p_loc, gravity, Xa_grav);
+                        float root_a[6];
+                        for (int i = 0; i < 6; i++) {
+                            root_a[i] = gravity[i];
+                        }
+                        if (base_acceleration != nullptr) {
+                            const float *base_a_b = &base_acceleration[batch * 6];
+                            for (int i = 0; i < 6; i++) {
+                                root_a[i] += base_a_b[i];
+                            }
+                        }
+                        float Xa_root[6];
+                        spatial_Xv(R, p_loc, root_a, Xa_root);
                         const float gq_g = link_multiplier * dot_crm_S(
-                            a_bar_k, Xa_grav, s_idx
+                            a_bar_k, Xa_root, s_idx
                         );
                         if (TPB > 1) {
                             atomicAdd(&grad_q[q_base + j_idx], -gq_g);
@@ -457,7 +469,22 @@ __global__ void rnea_backward_kernel(
                         }
                     }
                 }
-                // Root: v_parent = 0, so X·v_parent = 0, no contribution
+                else {
+                    if (j_type != FIXED && j_idx >= 0 && base_velocity != nullptr) {
+                        const int s_idx = get_s_index(j_type);
+                        const float *base_v_b = &base_velocity[batch * 6];
+                        float Xv_root[6];
+                        spatial_Xv(R, p_loc, base_v_b, Xv_root);
+                        const float gq_v = link_multiplier * dot_crm_S(
+                            v_bar_k, Xv_root, s_idx
+                        );
+                        if (TPB > 1) {
+                            atomicAdd(&grad_q[q_base + j_idx], -gq_v);
+                        } else {
+                            grad_q[q_base + j_idx] -= gq_v;
+                        }
+                    }
+                }
             }
         }
         if (TPB > 1) __syncwarp(batch_mask);

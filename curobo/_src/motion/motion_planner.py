@@ -627,6 +627,24 @@ class MotionPlanner:
         self.ik_solver.update_links_inertial(link_properties)
         self.trajopt_solver.update_links_inertial(link_properties)
 
+    def set_base_motion(
+        self,
+        base_velocity: Optional[torch.Tensor] = None,
+        base_acceleration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Set optional root/base motion for inverse dynamics during optimization.
+
+        Inputs use spatial [angular(3), linear(3)] order and require the robot
+        config to be created with dynamics enabled.
+        """
+        self.ik_solver.set_base_motion(base_velocity, base_acceleration)
+        self.trajopt_solver.set_base_motion(base_velocity, base_acceleration)
+
+    def clear_base_motion(self) -> None:
+        """Clear optional root/base motion from inverse dynamics rollouts."""
+        self.ik_solver.clear_base_motion()
+        self.trajopt_solver.clear_base_motion()
+
     def update_tool_pose_criteria(self, tool_pose_criteria: Dict[str, ToolPoseCriteria]):
         self.ik_solver.update_tool_pose_criteria(tool_pose_criteria)
         self.trajopt_solver.update_tool_pose_criteria(tool_pose_criteria)

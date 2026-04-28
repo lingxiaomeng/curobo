@@ -15,6 +15,10 @@ External forces (f_ext) are supported:
   - Forward: f[k] = I·a + v×*(I·v) - f_ext[k]
   - Backward: grad_f_ext[k] = -f_bar[k]
 
+Moving-root dynamics are supported through optional per-batch base spatial
+velocity and acceleration tensors. They keep the fixed-base API unchanged while
+letting rollout costs account for a moving platform.
+
 When f_ext is an optimization variable (requires_grad=True), gradients
 are computed and propagated through the RNEA backward kernel.
 """
@@ -112,6 +116,8 @@ class RNEAForwardFunction(Function):
         link_map: torch.Tensor,
         joint_offset_map: torch.Tensor,
         gravity: torch.Tensor,
+        base_velocity: Optional[torch.Tensor],
+        base_acceleration: Optional[torch.Tensor],
         level_starts: torch.Tensor,
         level_links: torch.Tensor,
         num_links: int,
@@ -144,6 +150,10 @@ class RNEAForwardFunction(Function):
             link_map: [num_links] Parent link index (int16).
             joint_offset_map: [num_links * 2] Mimic joint parameters.
             gravity: [6] Spatial gravity vector.
+            base_velocity: [batch_size, 6] optional root spatial velocity in
+                [angular(3), linear(3)] order.
+            base_acceleration: [batch_size, 6] optional root spatial acceleration
+                offset in [angular(3), linear(3)] order. Added to ``gravity``.
             level_starts: [n_levels + 1] Tree-level CSR offsets (int16).
             level_links: [num_links] Link indices sorted by level (int16).
             num_links: Number of links.
@@ -175,6 +185,18 @@ class RNEAForwardFunction(Function):
             gravity=gravity,
             joint_offset_map=joint_offset_map,
         )
+        if base_velocity is not None:
+            if base_velocity.shape != (batch_size, 6):
+                raise ValueError(
+                    f"base_velocity.shape: {base_velocity.shape} != {(batch_size, 6)}"
+                )
+            check_float32_tensors(device, base_velocity=base_velocity)
+        if base_acceleration is not None:
+            if base_acceleration.shape != (batch_size, 6):
+                raise ValueError(
+                    f"base_acceleration.shape: {base_acceleration.shape} != {(batch_size, 6)}"
+                )
+            check_float32_tensors(device, base_acceleration=base_acceleration)
         check_int8_tensors(device, joint_map_type=joint_map_type)
         check_int16_tensors(
             device,
@@ -201,6 +223,8 @@ class RNEAForwardFunction(Function):
             link_map=link_map,
             joint_offset_map=joint_offset_map,
             gravity=gravity,
+            base_velocity=base_velocity,
+            base_acceleration=base_acceleration,
             level_starts=level_starts,
             level_links=level_links,
             forward_cache=forward_cache,
@@ -229,6 +253,8 @@ class RNEAForwardFunction(Function):
         ctx.link_map = link_map
         ctx.joint_offset_map = joint_offset_map
         ctx.gravity = gravity
+        ctx.base_velocity = base_velocity
+        ctx.base_acceleration = base_acceleration
         ctx.level_starts = level_starts
         ctx.level_links = level_links
         ctx.num_links = num_links
@@ -303,6 +329,8 @@ class RNEAForwardFunction(Function):
             link_map=ctx.link_map,
             joint_offset_map=ctx.joint_offset_map,
             gravity=ctx.gravity,
+            base_velocity=ctx.base_velocity,
+            base_acceleration=ctx.base_acceleration,
             level_starts=ctx.level_starts,
             level_links=ctx.level_links,
             forward_cache=forward_cache,
@@ -318,7 +346,7 @@ class RNEAForwardFunction(Function):
         # q, qd, qdd, tau, grad_q_buf, grad_qd_buf, grad_qdd_buf,
         # forward_cache, fixed_transforms, link_masses_com, link_inertias,
         # joint_map_type, joint_map, link_map, joint_offset_map, gravity,
-        # level_starts, level_links,
+        # base_velocity, base_acceleration, level_starts, level_links,
         # num_links, num_dof, n_levels, threads_per_batch, f_ext, grad_f_ext_buf
         return (
             grad_q, grad_qd, grad_qdd,
@@ -335,6 +363,8 @@ class RNEAForwardFunction(Function):
             None,  # link_map
             None,  # joint_offset_map
             None,  # gravity
+            None,  # base_velocity
+            None,  # base_acceleration
             None,  # level_starts
             None,  # level_links
             None,  # num_links

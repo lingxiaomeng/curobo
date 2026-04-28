@@ -555,6 +555,24 @@ class SolverCore:
         for rollout in self.get_all_rollout_instances():
             rollout.transition_model.update_links_inertial(link_properties)
 
+    def set_base_motion(
+        self,
+        base_velocity: Optional[torch.Tensor] = None,
+        base_acceleration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Set optional root/base motion across all rollout instances."""
+        for rollout in self.get_all_rollout_instances():
+            rollout.set_base_motion(base_velocity, base_acceleration)
+        for rollout in self.additional_metrics_rollouts.values():
+            rollout.set_base_motion(base_velocity, base_acceleration)
+
+    def clear_base_motion(self) -> None:
+        """Clear optional root/base motion across all rollout instances."""
+        for rollout in self.get_all_rollout_instances():
+            rollout.clear_base_motion()
+        for rollout in self.additional_metrics_rollouts.values():
+            rollout.clear_base_motion()
+
     @profiler.record_function("solver_core/debug_dump")
     def debug_dump(self, file_path: str):
         if not curobo_runtime.debug_cuda_graphs:

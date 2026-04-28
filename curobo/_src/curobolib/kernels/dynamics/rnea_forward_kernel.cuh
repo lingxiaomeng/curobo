@@ -49,6 +49,11 @@ namespace dynamics {
  *              Each f_ext[b,k] is a 6D spatial wrench in link k's frame.
  *              Forces are subtracted: f[k] = I·a + v×*(I·v) - f_ext[k].
  *              Only accessed when HAS_EXTERNAL_FORCES=true.
+ * @param base_velocity Optional root spatial velocity [batch_size, 6] in the
+ *              parent/root frame, using [angular(3), linear(3)] order.
+ * @param base_acceleration Optional root spatial acceleration offset
+ *              [batch_size, 6] in the parent/root frame. It is added to the
+ *              gravity spatial acceleration.
  */
 template<int N_LINKS, int N_DOF, int TPB = 1, bool HAS_EXTERNAL_FORCES = false>
 __global__ void rnea_forward_kernel(
@@ -67,6 +72,8 @@ __global__ void rnea_forward_kernel(
     const int16_t * __restrict__ level_starts,
     const int16_t * __restrict__ level_links,
     float * __restrict__ forward_cache,
+    const float * __restrict__ base_velocity,
+    const float * __restrict__ base_acceleration,
     const float * __restrict__ f_ext,  // External forces (or nullptr if !HAS_EXTERNAL_FORCES)
     const int batch_size,
     const int n_levels
@@ -141,12 +148,29 @@ __global__ void rnea_forward_kernel(
                 float *a_k = &sf[k * 6];
 
                 if (is_root) {
-                    for (int i = 0; i < 6; i++) v_k[i] = 0.0f;
+                    float root_v[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                    float root_a[6];
+                    for (int i = 0; i < 6; i++) {
+                        root_a[i] = gravity[i];
+                    }
+                    if (base_velocity != nullptr) {
+                        const float *base_v_b = &base_velocity[batch * 6];
+                        for (int i = 0; i < 6; i++) {
+                            root_v[i] = base_v_b[i];
+                        }
+                    }
+                    if (base_acceleration != nullptr) {
+                        const float *base_a_b = &base_acceleration[batch * 6];
+                        for (int i = 0; i < 6; i++) {
+                            root_a[i] += base_a_b[i];
+                        }
+                    }
+                    spatial_Xv(R, p, root_v, v_k);
                     if (j_type != FIXED) {
                         const int s_idx = get_s_index(j_type);
-                        v_k[s_idx] = qd_eff;
+                        v_k[s_idx] += qd_eff;
                     }
-                    spatial_Xv(R, p, gravity, a_k);
+                    spatial_Xv(R, p, root_a, a_k);
                     if (j_type != FIXED) {
                         const int s_idx = get_s_index(j_type);
                         a_k[s_idx] += qdd_eff;

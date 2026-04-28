@@ -427,8 +427,23 @@ class RobotRollout:
 
     def update_dt(self, dt: float) -> None:
         self.transition_model.update_dt(dt)
+        self.metrics_transition_model.update_dt(dt)
         for manager in self._cost_manager_list:
             manager.update_dt(dt)
+
+    def set_base_motion(
+        self,
+        base_velocity: Optional[torch.Tensor] = None,
+        base_acceleration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Set optional root/base motion on optimization and metrics transitions."""
+        self.transition_model.set_base_motion(base_velocity, base_acceleration)
+        self.metrics_transition_model.set_base_motion(base_velocity, base_acceleration)
+
+    def clear_base_motion(self) -> None:
+        """Clear optional root/base motion on optimization and metrics transitions."""
+        self.transition_model.clear_base_motion()
+        self.metrics_transition_model.clear_base_motion()
 
     def reset(
         self,
