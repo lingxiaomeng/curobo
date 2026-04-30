@@ -24,6 +24,7 @@ import csv
 import math
 import os
 import random
+import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -81,13 +82,39 @@ class PlannerBundle:
     base_dt: float = 0.01
 
 
+@dataclass
+class MpcBundle:
+    method: MethodSpec
+    config: Any
+    module: Any
+    base_pose: np.ndarray
+    base_twist: np.ndarray
+    base_accel: np.ndarray
+
+
 METHODS = (
     MethodSpec("no_dynamics", load_dynamics=False, use_base_motion=False),
     MethodSpec("fixed_base_dynamics", load_dynamics=True, use_base_motion=False),
     MethodSpec("base_motion_dynamics", load_dynamics=True, use_base_motion=True),
 )
+MPC_METHOD = MethodSpec("mpc_python", load_dynamics=True, use_base_motion=True)
 
 PANDA_TORQUE_LIMITS_NM = (87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0)
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+PANDA_NMPC_SCRIPTS = WORKSPACE_ROOT / "src" / "panda_nmpc" / "scripts"
+DEFAULT_MPC_CONFIG = (
+    WORKSPACE_ROOT / "src" / "panda_nmpc" / "config" / "base_frame_numeric_sim.yaml"
+)
+DEFAULT_MPC_COLLISION_LINKS = (
+    "panda_link1_0",
+    "panda_link2_0",
+    "panda_link3_0",
+    "panda_link4_0",
+    "panda_link5_0",
+    "panda_link6_0",
+    "panda_link7_0",
+    "panda_hand_0",
+)
 
 
 def set_seed(seed: int) -> None:
@@ -661,6 +688,441 @@ def make_goal(problem: Dict[str, Any], planner: MotionPlanner) -> Tuple[JointSta
     return start_state, goal_tool_poses
 
 
+def load_mpc_module():
+    if str(PANDA_NMPC_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(PANDA_NMPC_SCRIPTS))
+    import base_frame_numeric_sim_main as mpc_module
+    import hppfcl
+    import pinocchio as pin
+
+    return mpc_module, pin, hppfcl
+
+
+def make_mpc_bundle(base_seed: int, args: argparse.Namespace) -> MpcBundle:
+    mpc_module, pin, hppfcl = load_mpc_module()
+    config = mpc_module.load_config(args.mpc_config)
+    if args.mpc_horizon > 0:
+        config.planner.T = args.mpc_horizon
+    if args.mpc_dt > 0.0:
+        config.planner.dt_ocp = args.mpc_dt
+    if args.mpc_iterations > 0:
+        config.planner.nb_iterations_max = args.mpc_iterations
+    if args.mpc_max_qp_iter > 0:
+        config.planner.max_qp_iter = args.mpc_max_qp_iter
+    if args.mpc_collision_safety_margin is not None:
+        config.planner.collision_safety_margin = args.mpc_collision_safety_margin
+
+    horizon = int(config.planner.T) + 1
+    base_pose, base_twist, base_accel = make_random_mpc_base_motion(
+        horizon, float(config.planner.dt_ocp), base_seed, args
+    )
+    return MpcBundle(
+        method=MPC_METHOD,
+        config=config,
+        module=mpc_module,
+        pin=pin,
+        hppfcl=hppfcl,
+        base_pose=base_pose,
+        base_twist=base_twist,
+        base_accel=base_accel,
+    )
+
+
+def quat_xyzw_to_matrix(quaternion: Sequence[float]) -> np.ndarray:
+    x, y, z, w = np.asarray(quaternion, dtype=float)
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm <= 0.0:
+        raise ValueError("Quaternion norm must be positive")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+            [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+            [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
+
+
+def pin_pose_from_wxyz(pin, pose: Sequence[float]):
+    pose = np.asarray(pose, dtype=float)
+    quat_xyzw = quat_wxyz_to_xyzw(pose[3:7])
+    return pin.SE3(quat_xyzw_to_matrix(quat_xyzw), pose[:3])
+
+
+def add_mpc_obstacle_geometry(bundle: MpcBundle, collision_model, name: str, kind: str, cfg: Dict[str, Any]) -> int:
+    pin = bundle.pin
+    hppfcl = bundle.hppfcl
+    if kind == "cuboid":
+        dims = np.asarray(cfg["dims"], dtype=float)
+        geometry = hppfcl.Box(float(dims[0]), float(dims[1]), float(dims[2]))
+    elif kind == "sphere":
+        geometry = hppfcl.Sphere(float(cfg["radius"]))
+    elif kind == "cylinder":
+        geometry = hppfcl.Cylinder(float(cfg["radius"]), float(cfg["height"]))
+    else:
+        raise ValueError(f"Unsupported MPC obstacle type: {kind}")
+    obstacle = pin.GeometryObject(
+        f"benchmark_{kind}_{name}",
+        0,
+        0,
+        geometry,
+        pin_pose_from_wxyz(pin, cfg["pose"]),
+    )
+    return int(collision_model.addGeometryObject(obstacle))
+
+
+def build_mpc_collision_model(
+    bundle: MpcBundle,
+    model,
+    problem: Dict[str, Any],
+    package_dirs: Sequence[str],
+    args: argparse.Namespace,
+):
+    pin = bundle.pin
+    collision_model = pin.buildGeomFromUrdf(
+        model,
+        bundle.config.robot_model.urdf_path,
+        pin.COLLISION,
+        package_dirs=list(package_dirs),
+    )
+    robot_geom_ids = [
+        int(collision_model.getGeometryId(name))
+        for name in args.mpc_collision_links
+        if collision_model.existGeometryName(name)
+    ]
+    if not robot_geom_ids:
+        robot_geom_ids = [
+            idx
+            for idx, geom in enumerate(collision_model.geometryObjects)
+            if geom.name.startswith("panda_") and "finger" not in geom.name and "link0" not in geom.name
+        ]
+
+    obstacle_ids: List[int] = []
+    obstacles = problem.get("obstacles", {})
+    for kind in ("cuboid", "sphere", "cylinder"):
+        for name, obstacle_cfg in obstacles.get(kind, {}).items():
+            obstacle_ids.append(
+                add_mpc_obstacle_geometry(bundle, collision_model, name, kind, obstacle_cfg)
+            )
+
+    unsupported = sorted(set(obstacles.keys()) - {"cuboid", "sphere", "cylinder"})
+    if unsupported and not args.mpc_ignore_unsupported_obstacles:
+        raise ValueError(f"MPC collision model does not support obstacle types: {unsupported}")
+
+    for robot_id in robot_geom_ids:
+        for obstacle_id in obstacle_ids:
+            collision_model.addCollisionPair(pin.CollisionPair(robot_id, obstacle_id))
+    return collision_model
+
+
+def mpc_inverse_dynamics(
+    pin,
+    floating_model,
+    q: np.ndarray,
+    dq: np.ndarray,
+    ddq: np.ndarray,
+    base_pose: np.ndarray,
+    base_twist: np.ndarray,
+    base_accel: np.ndarray,
+) -> np.ndarray:
+    data = floating_model.createData()
+    q_full = np.zeros(14)
+    v_full = np.zeros(13)
+    a_full = np.zeros(13)
+    q_full[:7] = base_pose
+    q_full[7:] = q
+    v_full[:6] = base_twist
+    v_full[6:] = dq
+    a_full[:6] = base_accel
+    a_full[6:] = ddq
+    return np.asarray(pin.rnea(floating_model, data, q_full, v_full, a_full))[6:].copy()
+
+
+def mpc_fk_pose_xyzw(pin, fixed_model, frame_id: int, q: np.ndarray, dq: np.ndarray) -> np.ndarray:
+    data = fixed_model.createData()
+    pin.forwardKinematics(fixed_model, data, q, dq)
+    pin.updateFramePlacements(fixed_model, data)
+    return np.asarray(pin.SE3ToXYZQUAT(data.oMf[frame_id])).copy()
+
+
+def mpc_min_collision_distance(pin, floating_model, collision_model, xs: Sequence[np.ndarray]) -> float:
+    if not collision_model.collisionPairs:
+        return float("inf")
+    model_data = floating_model.createData()
+    geom_data = collision_model.createData()
+    min_distance = float("inf")
+    for x in xs:
+        q_full = np.zeros(14)
+        q_full[:7] = zero_pose_np()
+        q_full[7:] = x[:7]
+        pin.computeDistances(floating_model, model_data, collision_model, geom_data, q_full)
+        for result in geom_data.distanceResults:
+            min_distance = min(min_distance, float(result.min_distance))
+    return min_distance
+
+
+def zero_pose_np() -> np.ndarray:
+    pose = np.zeros(7)
+    pose[6] = 1.0
+    return pose
+
+
+def make_empty_result_row(
+    method_name: str,
+    joint_names: Sequence[str],
+    base_stats: Dict[str, float],
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "method": method_name,
+        "skip": 0,
+        "success": 0,
+        "collision": 0,
+        "joint_limit_violation": 0,
+        "self_collision": 0,
+        "physical_violation": 0,
+        "torque_violation": 0,
+        "dynamics_success": 0,
+        "payload_success": 0,
+        "perception_success": 0,
+        "perception_interpolated_success": 0,
+        "eval_payload_mass_kg": args.mass,
+        "wall_time_s": float("nan"),
+        "total_time_s": float("nan"),
+        "solve_time_s": float("nan"),
+        "time": float("nan"),
+        "solve_time": float("nan"),
+        "perception_time": 0.0,
+        "position_error_mm": float("nan"),
+        "orientation_error_deg": float("nan"),
+        "position_error": float("nan"),
+        "orientation_error": float("nan"),
+        "motion_time_s": float("nan"),
+        "motion_time": float("nan"),
+        "attempts": 1,
+        "trajectory_length": 1,
+        "eef_position_path_length": float("nan"),
+        "eef_orientation_path_length": float("nan"),
+        "cspace_path_length_rad": float("nan"),
+        "cspace_path_length": float("nan"),
+        "max_abs_jerk": float("nan"),
+        "jerk": float("nan"),
+        "base_motion_eval_energy_j": float("nan"),
+        "base_motion_eval_positive_energy_j": float("nan"),
+        "base_motion_eval_max_abs_tau_nm": float("nan"),
+        "base_motion_eval_rms_tau_nm": float("nan"),
+        "base_motion_eval_mean_abs_power_w": float("nan"),
+        "base_motion_eval_work_j": float("nan"),
+        "base_motion_eval_peak_power_w": float("nan"),
+        "base_motion_eval_max_tau_ratio": float("nan"),
+        "moving_eval_energy_j": float("nan"),
+        "moving_eval_positive_energy_j": float("nan"),
+        "moving_eval_max_abs_tau_nm": float("nan"),
+        "moving_eval_rms_tau_nm": float("nan"),
+        "moving_eval_mean_abs_power_w": float("nan"),
+        "moving_eval_work_j": float("nan"),
+        "moving_eval_peak_power_w": float("nan"),
+        "energy": float("nan"),
+        "torque": float("nan"),
+        "power": float("nan"),
+        "work": float("nan"),
+        "peak_power": float("nan"),
+        "max_tau_ratio": float("nan"),
+        "status": "failure",
+    }
+    for joint_name in joint_names:
+        row[f"max_abs_tau_{joint_name}_nm"] = float("nan")
+        row[f"tau_limit_ratio_{joint_name}"] = float("nan")
+    row.update(base_stats)
+    return row
+
+
+def run_one_mpc_plan(
+    bundle: MpcBundle,
+    problem: Dict[str, Any],
+    base_stats: Dict[str, float],
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    pin = bundle.pin
+    mpc_module = bundle.module
+    config = deepcopy(bundle.config)
+    config.simulation.initial_joint_position = np.asarray(problem["start"], dtype=float)
+    goal_pose = problem["goal_pose"]
+    config.simulation.target_pose_in_base = np.concatenate(
+        [
+            np.asarray(goal_pose["position_xyz"], dtype=float),
+            quat_wxyz_to_xyzw(goal_pose["quaternion_wxyz"]),
+        ]
+    )
+    config.planner.ee_frame_name = args.mpc_ee_frame or goal_pose.get(
+        "frame", config.planner.ee_frame_name
+    )
+
+    floating_model = mpc_module.load_floating_panda_model(config.robot_model.urdf_path)
+    fixed_model = mpc_module.load_panda_model(config.robot_model.urdf_path)
+    joint_names = list(fixed_model.names[1 : 1 + fixed_model.nv])
+    row = make_empty_result_row(MPC_METHOD.name, joint_names, base_stats, args)
+
+    try:
+        collision_model = build_mpc_collision_model(
+            bundle, floating_model, problem, config.robot_model.package_dirs, args
+        )
+        planner = mpc_module.BaseFrameReachingPy(floating_model, collision_model, config.planner)
+        q0 = config.simulation.initial_joint_position
+        dq0 = np.zeros(7)
+        x0 = np.concatenate([q0, dq0])
+        horizon = int(config.planner.T) + 1
+        base_pose = bundle.base_pose[:horizon]
+        base_twist = bundle.base_twist[:horizon]
+        base_accel = bundle.base_accel[:horizon]
+
+        planner.ocp.problem.x0 = x0
+        planner.set_base_motion_prediction(list(base_pose), list(base_twist), list(base_accel))
+        planner.set_ee_ref_base_placement_list_constant_weights(
+            config.simulation.target_pose_in_base,
+            config.simulation.target_twist_in_base,
+            True,
+            1.0,
+        )
+        posture_ref = np.zeros(14)
+        posture_ref[:7] = q0
+        planner.set_posture_ref(posture_ref)
+        xs_init = [x0.copy() for _ in range(horizon)]
+        us_init = [
+            mpc_inverse_dynamics(
+                pin, floating_model, q0, dq0, np.zeros(7), base_pose[i], base_twist[i], base_accel[i]
+            )
+            for i in range(horizon - 1)
+        ]
+
+        start = time.perf_counter()
+        planner.solve(xs_init, us_init)
+        solve_time = time.perf_counter() - start
+        xs = [np.asarray(x, dtype=float).copy() for x in planner.ocp.xs]
+        us = [np.asarray(u, dtype=float).copy() for u in planner.ocp.us]
+        wall_time = solve_time
+
+        if len(xs) < 2 or len(us) + 1 != len(xs):
+            raise RuntimeError("MPC trajectory dimensions are inconsistent")
+        if not all(np.all(np.isfinite(x)) for x in xs) or not all(np.all(np.isfinite(u)) for u in us):
+            raise RuntimeError("MPC returned non-finite trajectory values")
+
+        dt = float(config.planner.dt_ocp)
+        q = np.asarray([x[:7] for x in xs])
+        dq = np.asarray([x[7:] for x in xs])
+        tau = np.asarray(us)
+        target_pose = config.simulation.target_pose_in_base
+        ee_poses = np.asarray(
+            [mpc_fk_pose_xyzw(pin, fixed_model, fixed_model.getFrameId(config.planner.ee_frame_name), q[i], dq[i])
+             for i in range(len(xs))]
+        )
+        position_errors = np.linalg.norm(ee_poses[:, :3] - target_pose[:3], axis=1)
+        target_rotation = quat_xyzw_to_matrix(target_pose[3:7])
+        final_rotation = quat_xyzw_to_matrix(ee_poses[-1, 3:7])
+        rot_err = target_rotation.T @ final_rotation
+        orientation_error = abs(
+            math.acos(float(np.clip((np.trace(rot_err) - 1.0) * 0.5, -1.0, 1.0)))
+        )
+        q_diff = np.diff(q, axis=0)
+        dq_diff = np.diff(dq, axis=0)
+        ddq = dq_diff / dt if len(dq_diff) else np.zeros((0, 7))
+        jerk = np.diff(ddq, axis=0) / dt if len(ddq) > 1 else np.zeros((0, 7))
+        power = tau * dq[:-1]
+        torque_limits = np.asarray(PANDA_TORQUE_LIMITS_NM)
+        max_abs_tau_per_joint = np.max(np.abs(tau), axis=0) if len(tau) else np.zeros(7)
+        tau_limit_ratio = max_abs_tau_per_joint / torque_limits
+        torque_violation = bool(np.any(max_abs_tau_per_joint > torque_limits))
+        lower = np.asarray(fixed_model.lowerPositionLimit[:7])
+        upper = np.asarray(fixed_model.upperPositionLimit[:7])
+        velocity_limits = np.asarray(fixed_model.velocityLimit[:7])
+        joint_limit_violation = bool(
+            np.any(q < lower - 1e-6)
+            or np.any(q > upper + 1e-6)
+            or np.any(np.abs(dq) > velocity_limits + 1e-6)
+        )
+        min_collision_distance = mpc_min_collision_distance(pin, floating_model, collision_model, xs)
+        collision = bool(min_collision_distance < float(config.planner.collision_safety_margin) - 1e-6)
+        success = bool(
+            position_errors[-1] <= args.mpc_position_tolerance
+            and orientation_error <= args.mpc_orientation_tolerance
+            and not collision
+            and not joint_limit_violation
+        )
+
+        eef_position_length = float(np.sum(np.linalg.norm(np.diff(ee_poses[:, :3], axis=0), axis=1)))
+        cspace_length = float(np.sum(np.linalg.norm(q_diff, axis=1))) if len(q_diff) else 0.0
+        energy = float(np.sum(np.abs(power)) * dt)
+        positive_energy = float(np.sum(np.clip(power, 0.0, None)) * dt)
+        work = float(np.sum(power) * dt)
+        mean_abs_power = float(np.mean(np.abs(power))) if power.size else 0.0
+        peak_power = float(np.max(np.abs(power))) if power.size else 0.0
+        max_tau = float(np.max(max_abs_tau_per_joint)) if len(max_abs_tau_per_joint) else 0.0
+        rms_tau = float(math.sqrt(np.mean(tau * tau))) if tau.size else 0.0
+
+        row.update(
+            {
+                "success": int(success),
+                "collision": int(collision),
+                "joint_limit_violation": int(joint_limit_violation),
+                "physical_violation": int(torque_violation),
+                "torque_violation": int(torque_violation),
+                "dynamics_success": int(not torque_violation and not joint_limit_violation),
+                "payload_success": int(not torque_violation and not joint_limit_violation),
+                "wall_time_s": wall_time,
+                "total_time_s": wall_time,
+                "solve_time_s": solve_time,
+                "time": wall_time,
+                "solve_time": solve_time,
+                "position_error_mm": float(position_errors[-1] * 1000.0),
+                "orientation_error_deg": float(orientation_error * 180.0 / math.pi),
+                "position_error": float(position_errors[-1] * 1000.0),
+                "orientation_error": float(orientation_error * 180.0 / math.pi),
+                "motion_time_s": dt * max(0, len(xs) - 1),
+                "motion_time": dt * max(0, len(xs) - 1),
+                "trajectory_length": len(xs),
+                "eef_position_path_length": eef_position_length,
+                "eef_orientation_path_length": float("nan"),
+                "cspace_path_length_rad": cspace_length,
+                "cspace_path_length": cspace_length,
+                "max_abs_jerk": float(np.max(np.abs(jerk))) if jerk.size else 0.0,
+                "jerk": float(np.max(np.abs(jerk))) if jerk.size else 0.0,
+                "base_motion_eval_energy_j": energy,
+                "base_motion_eval_positive_energy_j": positive_energy,
+                "base_motion_eval_max_abs_tau_nm": max_tau,
+                "base_motion_eval_rms_tau_nm": rms_tau,
+                "base_motion_eval_mean_abs_power_w": mean_abs_power,
+                "base_motion_eval_work_j": work,
+                "base_motion_eval_peak_power_w": peak_power,
+                "base_motion_eval_max_tau_ratio": float(np.max(tau_limit_ratio)),
+                "moving_eval_energy_j": energy,
+                "moving_eval_positive_energy_j": positive_energy,
+                "moving_eval_max_abs_tau_nm": max_tau,
+                "moving_eval_rms_tau_nm": rms_tau,
+                "moving_eval_mean_abs_power_w": mean_abs_power,
+                "moving_eval_work_j": work,
+                "moving_eval_peak_power_w": peak_power,
+                "energy": energy,
+                "torque": max_tau,
+                "power": mean_abs_power,
+                "work": work,
+                "peak_power": peak_power,
+                "max_tau_ratio": float(np.max(tau_limit_ratio)),
+                "min_collision_distance_m": min_collision_distance,
+                "status": "success" if success else "mpc_constraint_or_goal_failure",
+            }
+        )
+        for joint_name, max_tau_joint, tau_ratio_joint in zip(
+            joint_names, max_abs_tau_per_joint, tau_limit_ratio
+        ):
+            row[f"max_abs_tau_{joint_name}_nm"] = float(max_tau_joint)
+            row[f"tau_limit_ratio_{joint_name}"] = float(tau_ratio_joint)
+        return row
+    except Exception as exc:
+        row["status"] = f"mpc_exception:{type(exc).__name__}:{exc}"
+        return row
+
+
 def run_one_plan(
     bundle: PlannerBundle,
     problem: Dict[str, Any],
@@ -1023,6 +1485,8 @@ def print_motion_plan_style_summary(
     args: argparse.Namespace,
 ) -> None:
     method_names = [method.name for method in METHODS]
+    if not args.skip_mpc:
+        method_names.append(MPC_METHOD.name)
     all_tables: Dict[str, Any] = {}
 
     try:
@@ -1175,6 +1639,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-linear-amp-m", type=float, default=0.2)
     parser.add_argument("--base-freq-min", type=float, default=0.30)
     parser.add_argument("--base-freq-max", type=float, default=1.0)
+    parser.add_argument(
+        "--skip-mpc",
+        action="store_true",
+        help="Skip the pure-Python Crocoddyl/floating_mpc comparison method.",
+    )
+    parser.add_argument("--mpc-config", type=Path, default=DEFAULT_MPC_CONFIG)
+    parser.add_argument("--mpc-horizon", type=int, default=0, help="0 keeps the YAML horizon.")
+    parser.add_argument("--mpc-dt", type=float, default=0.0, help="0 keeps the YAML dt_ocp.")
+    parser.add_argument(
+        "--mpc-iterations",
+        type=int,
+        default=0,
+        help="0 keeps the YAML nb_iterations_max.",
+    )
+    parser.add_argument(
+        "--mpc-max-qp-iter",
+        type=int,
+        default=0,
+        help="0 keeps the YAML max_qp_iter.",
+    )
+    parser.add_argument("--mpc-ee-frame", type=str, default=None)
+    parser.add_argument("--mpc-position-tolerance", type=float, default=0.02)
+    parser.add_argument("--mpc-orientation-tolerance", type=float, default=0.10)
+    parser.add_argument("--mpc-collision-safety-margin", type=float, default=None)
+    parser.add_argument(
+        "--mpc-collision-links",
+        nargs="+",
+        default=list(DEFAULT_MPC_COLLISION_LINKS),
+        help="Pinocchio collision geometry names paired with benchmark obstacles.",
+    )
+    parser.add_argument(
+        "--mpc-ignore-unsupported-obstacles",
+        action="store_true",
+        help="Ignore obstacle types that cannot be converted to hppfcl primitives.",
+    )
     return parser.parse_args()
 
 
@@ -1206,6 +1705,7 @@ def main() -> int:
         for group_index, (group_name, scene_problems) in enumerate(tqdm(group_items)):
             n_obstacles = check_problems(scene_problems, mesh=args.mesh)
             bundles: Dict[str, PlannerBundle] = {}
+            mpc_bundle: Optional[MpcBundle] = None
             group_rows: List[Dict[str, Any]] = []
             try:
                 for method in METHODS:
@@ -1222,6 +1722,8 @@ def main() -> int:
                     args,
                 )
                 update_base_motion_buffer(base_bundle, base_velocity, base_acceleration)
+                if not args.skip_mpc:
+                    mpc_bundle = make_mpc_bundle(base_seed, args)
 
                 # Warm up after the moving-base buffers are populated. cuRobo's
                 # dynamics expansion cache and CUDA graphs can then reuse stable
@@ -1267,12 +1769,37 @@ def main() -> int:
                         all_rows.append(row)
                         group_rows.append(row)
 
+                    if mpc_bundle is not None:
+                        row = run_one_mpc_plan(
+                            mpc_bundle,
+                            problem,
+                            base_stats,
+                            args,
+                        )
+                        row.update(
+                            {
+                                "dataset": dataset_name,
+                                "group": group_name,
+                                "group_index": group_index,
+                                "problem_index": problem_index,
+                                "base_motion_dt": mpc_bundle.config.planner.dt_ocp,
+                                "base_motion_horizon": mpc_bundle.config.planner.T + 1,
+                            }
+                        )
+                        all_rows.append(row)
+                        group_rows.append(row)
+
                 if not args.kpi:
                     for method in METHODS:
                         method_group_rows = [
                             row for row in group_rows if row["method"] == method.name
                         ]
                         print_group_line(group_name, method.name, method_group_rows)
+                    if mpc_bundle is not None:
+                        method_group_rows = [
+                            row for row in group_rows if row["method"] == MPC_METHOD.name
+                        ]
+                        print_group_line(group_name, MPC_METHOD.name, method_group_rows)
             finally:
                 for bundle in bundles.values():
                     bundle.planner.destroy()
