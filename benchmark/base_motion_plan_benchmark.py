@@ -692,14 +692,12 @@ def load_mpc_module():
     if str(PANDA_NMPC_SCRIPTS) not in sys.path:
         sys.path.insert(0, str(PANDA_NMPC_SCRIPTS))
     import base_frame_numeric_sim_main as mpc_module
-    import hppfcl
-    import pinocchio as pin
 
-    return mpc_module, pin, hppfcl
+    return mpc_module
 
 
 def make_mpc_bundle(base_seed: int, args: argparse.Namespace) -> MpcBundle:
-    mpc_module, pin, hppfcl = load_mpc_module()
+    mpc_module = load_mpc_module()
     config = mpc_module.load_config(args.mpc_config)
     if args.mpc_horizon > 0:
         config.planner.T = args.mpc_horizon
@@ -713,159 +711,24 @@ def make_mpc_bundle(base_seed: int, args: argparse.Namespace) -> MpcBundle:
         config.planner.collision_safety_margin = args.mpc_collision_safety_margin
 
     horizon = int(config.planner.T) + 1
-    base_pose, base_twist, base_accel = make_random_mpc_base_motion(
-        horizon, float(config.planner.dt_ocp), base_seed, args
+    base_pose, base_twist, base_accel = mpc_module.make_random_base_motion_prediction(
+        horizon,
+        float(config.planner.dt_ocp),
+        base_seed,
+        args.base_freq_min,
+        args.base_freq_max,
+        args.base_angle_amp_deg,
+        args.base_yaw_scale,
+        args.base_linear_amp_m,
     )
     return MpcBundle(
         method=MPC_METHOD,
         config=config,
         module=mpc_module,
-        pin=pin,
-        hppfcl=hppfcl,
         base_pose=base_pose,
         base_twist=base_twist,
         base_accel=base_accel,
     )
-
-
-def quat_xyzw_to_matrix(quaternion: Sequence[float]) -> np.ndarray:
-    x, y, z, w = np.asarray(quaternion, dtype=float)
-    norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm <= 0.0:
-        raise ValueError("Quaternion norm must be positive")
-    x, y, z, w = x / norm, y / norm, z / norm, w / norm
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
-            [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
-            [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=float,
-    )
-
-
-def pin_pose_from_wxyz(pin, pose: Sequence[float]):
-    pose = np.asarray(pose, dtype=float)
-    quat_xyzw = quat_wxyz_to_xyzw(pose[3:7])
-    return pin.SE3(quat_xyzw_to_matrix(quat_xyzw), pose[:3])
-
-
-def add_mpc_obstacle_geometry(bundle: MpcBundle, collision_model, name: str, kind: str, cfg: Dict[str, Any]) -> int:
-    pin = bundle.pin
-    hppfcl = bundle.hppfcl
-    if kind == "cuboid":
-        dims = np.asarray(cfg["dims"], dtype=float)
-        geometry = hppfcl.Box(float(dims[0]), float(dims[1]), float(dims[2]))
-    elif kind == "sphere":
-        geometry = hppfcl.Sphere(float(cfg["radius"]))
-    elif kind == "cylinder":
-        geometry = hppfcl.Cylinder(float(cfg["radius"]), float(cfg["height"]))
-    else:
-        raise ValueError(f"Unsupported MPC obstacle type: {kind}")
-    obstacle = pin.GeometryObject(
-        f"benchmark_{kind}_{name}",
-        0,
-        0,
-        geometry,
-        pin_pose_from_wxyz(pin, cfg["pose"]),
-    )
-    return int(collision_model.addGeometryObject(obstacle))
-
-
-def build_mpc_collision_model(
-    bundle: MpcBundle,
-    model,
-    problem: Dict[str, Any],
-    package_dirs: Sequence[str],
-    args: argparse.Namespace,
-):
-    pin = bundle.pin
-    collision_model = pin.buildGeomFromUrdf(
-        model,
-        bundle.config.robot_model.urdf_path,
-        pin.COLLISION,
-        package_dirs=list(package_dirs),
-    )
-    robot_geom_ids = [
-        int(collision_model.getGeometryId(name))
-        for name in args.mpc_collision_links
-        if collision_model.existGeometryName(name)
-    ]
-    if not robot_geom_ids:
-        robot_geom_ids = [
-            idx
-            for idx, geom in enumerate(collision_model.geometryObjects)
-            if geom.name.startswith("panda_") and "finger" not in geom.name and "link0" not in geom.name
-        ]
-
-    obstacle_ids: List[int] = []
-    obstacles = problem.get("obstacles", {})
-    for kind in ("cuboid", "sphere", "cylinder"):
-        for name, obstacle_cfg in obstacles.get(kind, {}).items():
-            obstacle_ids.append(
-                add_mpc_obstacle_geometry(bundle, collision_model, name, kind, obstacle_cfg)
-            )
-
-    unsupported = sorted(set(obstacles.keys()) - {"cuboid", "sphere", "cylinder"})
-    if unsupported and not args.mpc_ignore_unsupported_obstacles:
-        raise ValueError(f"MPC collision model does not support obstacle types: {unsupported}")
-
-    for robot_id in robot_geom_ids:
-        for obstacle_id in obstacle_ids:
-            collision_model.addCollisionPair(pin.CollisionPair(robot_id, obstacle_id))
-    return collision_model
-
-
-def mpc_inverse_dynamics(
-    pin,
-    floating_model,
-    q: np.ndarray,
-    dq: np.ndarray,
-    ddq: np.ndarray,
-    base_pose: np.ndarray,
-    base_twist: np.ndarray,
-    base_accel: np.ndarray,
-) -> np.ndarray:
-    data = floating_model.createData()
-    q_full = np.zeros(14)
-    v_full = np.zeros(13)
-    a_full = np.zeros(13)
-    q_full[:7] = base_pose
-    q_full[7:] = q
-    v_full[:6] = base_twist
-    v_full[6:] = dq
-    a_full[:6] = base_accel
-    a_full[6:] = ddq
-    return np.asarray(pin.rnea(floating_model, data, q_full, v_full, a_full))[6:].copy()
-
-
-def mpc_fk_pose_xyzw(pin, fixed_model, frame_id: int, q: np.ndarray, dq: np.ndarray) -> np.ndarray:
-    data = fixed_model.createData()
-    pin.forwardKinematics(fixed_model, data, q, dq)
-    pin.updateFramePlacements(fixed_model, data)
-    return np.asarray(pin.SE3ToXYZQUAT(data.oMf[frame_id])).copy()
-
-
-def mpc_min_collision_distance(pin, floating_model, collision_model, xs: Sequence[np.ndarray]) -> float:
-    if not collision_model.collisionPairs:
-        return float("inf")
-    model_data = floating_model.createData()
-    geom_data = collision_model.createData()
-    min_distance = float("inf")
-    for x in xs:
-        q_full = np.zeros(14)
-        q_full[:7] = zero_pose_np()
-        q_full[7:] = x[:7]
-        pin.computeDistances(floating_model, model_data, collision_model, geom_data, q_full)
-        for result in geom_data.distanceResults:
-            min_distance = min(min_distance, float(result.min_distance))
-    return min_distance
-
-
-def zero_pose_np() -> np.ndarray:
-    pose = np.zeros(7)
-    pose[6] = 1.0
-    return pose
 
 
 def make_empty_result_row(
@@ -944,7 +807,6 @@ def run_one_mpc_plan(
     base_stats: Dict[str, float],
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    pin = bundle.pin
     mpc_module = bundle.module
     config = deepcopy(bundle.config)
     config.simulation.initial_joint_position = np.asarray(problem["start"], dtype=float)
@@ -952,7 +814,7 @@ def run_one_mpc_plan(
     config.simulation.target_pose_in_base = np.concatenate(
         [
             np.asarray(goal_pose["position_xyz"], dtype=float),
-            quat_wxyz_to_xyzw(goal_pose["quaternion_wxyz"]),
+            mpc_module.quat_wxyz_to_xyzw(goal_pose["quaternion_wxyz"]),
         ]
     )
     config.planner.ee_frame_name = args.mpc_ee_frame or goal_pose.get(
@@ -965,8 +827,13 @@ def run_one_mpc_plan(
     row = make_empty_result_row(MPC_METHOD.name, joint_names, base_stats, args)
 
     try:
-        collision_model = build_mpc_collision_model(
-            bundle, floating_model, problem, config.robot_model.package_dirs, args
+        collision_model = mpc_module.build_collision_model_with_obstacles(
+            floating_model,
+            config.robot_model.urdf_path,
+            config.robot_model.package_dirs,
+            problem.get("obstacles", {}),
+            args.mpc_collision_links,
+            args.mpc_ignore_unsupported_obstacles,
         )
         planner = mpc_module.BaseFrameReachingPy(floating_model, collision_model, config.planner)
         q0 = config.simulation.initial_joint_position
@@ -990,8 +857,8 @@ def run_one_mpc_plan(
         planner.set_posture_ref(posture_ref)
         xs_init = [x0.copy() for _ in range(horizon)]
         us_init = [
-            mpc_inverse_dynamics(
-                pin, floating_model, q0, dq0, np.zeros(7), base_pose[i], base_twist[i], base_accel[i]
+            mpc_module.compute_floating_inverse_dynamics(
+                floating_model, q0, dq0, np.zeros(7), base_pose[i], base_twist[i], base_accel[i]
             )
             for i in range(horizon - 1)
         ]
@@ -1014,12 +881,12 @@ def run_one_mpc_plan(
         tau = np.asarray(us)
         target_pose = config.simulation.target_pose_in_base
         ee_poses = np.asarray(
-            [mpc_fk_pose_xyzw(pin, fixed_model, fixed_model.getFrameId(config.planner.ee_frame_name), q[i], dq[i])
+            [mpc_module.compute_fixed_fk_pose_xyzw(fixed_model, fixed_model.getFrameId(config.planner.ee_frame_name), q[i], dq[i])
              for i in range(len(xs))]
         )
         position_errors = np.linalg.norm(ee_poses[:, :3] - target_pose[:3], axis=1)
-        target_rotation = quat_xyzw_to_matrix(target_pose[3:7])
-        final_rotation = quat_xyzw_to_matrix(ee_poses[-1, 3:7])
+        target_rotation = mpc_module.quat_xyzw_to_matrix(target_pose[3:7])
+        final_rotation = mpc_module.quat_xyzw_to_matrix(ee_poses[-1, 3:7])
         rot_err = target_rotation.T @ final_rotation
         orientation_error = abs(
             math.acos(float(np.clip((np.trace(rot_err) - 1.0) * 0.5, -1.0, 1.0)))
@@ -1041,7 +908,9 @@ def run_one_mpc_plan(
             or np.any(q > upper + 1e-6)
             or np.any(np.abs(dq) > velocity_limits + 1e-6)
         )
-        min_collision_distance = mpc_min_collision_distance(pin, floating_model, collision_model, xs)
+        min_collision_distance = mpc_module.min_collision_distance(
+            floating_model, collision_model, xs
+        )
         collision = bool(min_collision_distance < float(config.planner.collision_safety_margin) - 1e-6)
         success = bool(
             position_errors[-1] <= args.mpc_position_tolerance
