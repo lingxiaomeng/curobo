@@ -87,6 +87,9 @@ class MpcBundle:
     method: MethodSpec
     config: Any
     module: Any
+    floating_model: Any
+    fixed_model: Any
+    base_collision_model: Any
     base_pose: np.ndarray
     base_twist: np.ndarray
     base_accel: np.ndarray
@@ -98,6 +101,7 @@ METHODS = (
     MethodSpec("base_motion_dynamics", load_dynamics=True, use_base_motion=True),
 )
 MPC_METHOD = MethodSpec("mpc_python", load_dynamics=True, use_base_motion=True)
+ALL_METHOD_NAMES = tuple(method.name for method in METHODS) + (MPC_METHOD.name,)
 
 PANDA_TORQUE_LIMITS_NM = (87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0)
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -721,10 +725,21 @@ def make_mpc_bundle(base_seed: int, args: argparse.Namespace) -> MpcBundle:
         args.base_yaw_scale,
         args.base_linear_amp_m,
     )
+    floating_model = mpc_module.load_floating_panda_model(config.robot_model.urdf_path)
+    fixed_model = mpc_module.load_panda_model(config.robot_model.urdf_path)
+    base_collision_model = mpc_module.pin.buildGeomFromUrdf(
+        floating_model,
+        config.robot_model.urdf_path,
+        mpc_module.pin.COLLISION,
+        package_dirs=list(config.robot_model.package_dirs),
+    )
     return MpcBundle(
         method=MPC_METHOD,
         config=config,
         module=mpc_module,
+        floating_model=floating_model,
+        fixed_model=fixed_model,
+        base_collision_model=base_collision_model,
         base_pose=base_pose,
         base_twist=base_twist,
         base_accel=base_accel,
@@ -821,16 +836,14 @@ def run_one_mpc_plan(
         "frame", config.planner.ee_frame_name
     )
 
-    floating_model = mpc_module.load_floating_panda_model(config.robot_model.urdf_path)
-    fixed_model = mpc_module.load_panda_model(config.robot_model.urdf_path)
+    floating_model = bundle.floating_model
+    fixed_model = bundle.fixed_model
     joint_names = list(fixed_model.names[1 : 1 + fixed_model.nv])
     row = make_empty_result_row(MPC_METHOD.name, joint_names, base_stats, args)
 
     try:
-        collision_model = mpc_module.build_collision_model_with_obstacles(
-            floating_model,
-            config.robot_model.urdf_path,
-            config.robot_model.package_dirs,
+        collision_model = mpc_module.add_obstacles_to_collision_model(
+            deepcopy(bundle.base_collision_model),
             problem.get("obstacles", {}),
             args.mpc_collision_links,
             args.mpc_ignore_unsupported_obstacles,
@@ -1353,9 +1366,7 @@ def print_motion_plan_style_summary(
     rows: List[Dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
-    method_names = [method.name for method in METHODS]
-    if not args.skip_mpc:
-        method_names.append(MPC_METHOD.name)
+    method_names = args.methods
     all_tables: Dict[str, Any] = {}
 
     try:
@@ -1459,6 +1470,18 @@ def parse_args() -> argparse.Namespace:
         default="motion_benchmaker",
     )
     parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=ALL_METHOD_NAMES,
+        default=list(ALL_METHOD_NAMES),
+        help="Planner methods to run. Use this to avoid running every variant during iteration.",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Apply a fast smoke-test preset unless the corresponding limits were explicitly set.",
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="When True, runs only on small dataaset",
@@ -1511,7 +1534,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-mpc",
         action="store_true",
-        help="Skip the pure-Python Crocoddyl/floating_mpc comparison method.",
+        help="Deprecated alias: remove mpc_python from --methods.",
     )
     parser.add_argument("--mpc-config", type=Path, default=DEFAULT_MPC_CONFIG)
     parser.add_argument("--mpc-horizon", type=int, default=0, help="0 keeps the YAML horizon.")
@@ -1543,14 +1566,35 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore obstacle types that cannot be converted to hppfcl primitives.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.skip_mpc:
+        args.methods = [method for method in args.methods if method != MPC_METHOD.name]
+    if args.quick:
+        if args.dataset == "motion_benchmaker":
+            args.dataset = "demo"
+        if args.max_groups == 0:
+            args.max_groups = 1
+        if args.max_problems_per_group == 0:
+            args.max_problems_per_group = 2
+        args.ik_seeds = min(args.ik_seeds, 8)
+        args.trajopt_seeds = min(args.trajopt_seeds, 2)
+        args.max_attempts = min(args.max_attempts, 10)
+        args.warmup_iters = min(args.warmup_iters, 1)
+        args.mpc_horizon = args.mpc_horizon if args.mpc_horizon > 0 else 80
+        args.mpc_iterations = args.mpc_iterations if args.mpc_iterations > 0 else 5
+        args.mpc_max_qp_iter = args.mpc_max_qp_iter if args.mpc_max_qp_iter > 0 else 80
+    if not args.methods:
+        raise ValueError("No methods selected")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     if args.demo:
         args.dataset = "demo"
-    if not torch.cuda.is_available():
+    curobo_methods = [method for method in METHODS if method.name in args.methods]
+    run_mpc = MPC_METHOD.name in args.methods
+    if curobo_methods and not torch.cuda.is_available():
         raise RuntimeError(
             "This benchmark requires CUDA. Activate the pink environment in a CUDA-enabled session."
         )
@@ -1566,45 +1610,49 @@ def main() -> int:
     datasets = get_datasets(args.dataset)
 
     for dataset_index, (dataset_name, problems) in enumerate(datasets):
+        print(f"*****RUN: {dataset_index} - {dataset_name}")
         mpinets = is_mpinets_dataset(problems)
         group_items = list(problems.items())
         if args.max_groups > 0:
             group_items = group_items[: args.max_groups]
 
         for group_index, (group_name, scene_problems) in enumerate(tqdm(group_items)):
-            n_obstacles = check_problems(scene_problems, mesh=args.mesh)
+            print(f"*****RUN: {dataset_index}.{group_index} - {dataset_name} - {group_name}")
+            n_obstacles = check_problems(scene_problems, mesh=args.mesh) if curobo_methods else 0
             bundles: Dict[str, PlannerBundle] = {}
             mpc_bundle: Optional[MpcBundle] = None
             group_rows: List[Dict[str, Any]] = []
             try:
-                for method in METHODS:
+                for method in curobo_methods:
                     set_seed(args.seed)
                     bundle, _ = make_planner_bundle(method, n_obstacles, mpinets, args)
                     bundles[method.name] = bundle
 
-                base_bundle = bundles["base_motion_dynamics"]
                 base_seed = args.seed + 1000000 * dataset_index + 10000 * group_index
-                base_velocity, base_acceleration, base_stats = make_random_base_motion(
-                    base_bundle.base_horizon,
-                    base_bundle.base_dt,
-                    base_seed,
-                    args,
-                )
-                update_base_motion_buffer(base_bundle, base_velocity, base_acceleration)
-                if not args.skip_mpc:
+                base_stats: Dict[str, float] = {}
+                base_bundle = bundles.get("base_motion_dynamics")
+                if base_bundle is not None:
+                    base_velocity, base_acceleration, base_stats = make_random_base_motion(
+                        base_bundle.base_horizon,
+                        base_bundle.base_dt,
+                        base_seed,
+                        args,
+                    )
+                    update_base_motion_buffer(base_bundle, base_velocity, base_acceleration)
+                if run_mpc:
                     mpc_bundle = make_mpc_bundle(base_seed, args)
 
                 # Warm up after the moving-base buffers are populated. cuRobo's
                 # dynamics expansion cache and CUDA graphs can then reuse stable
                 # base-motion tensor pointers for the entire scene group.
-                for method in METHODS:
+                for method in curobo_methods:
                     bundle = bundles[method.name]
                     bundle.planner.warmup(
                         enable_graph=not args.disable_cuda_graph,
                         num_warmup_iterations=args.warmup_iters,
                     )
 
-                base_motion_eval_dynamics = get_dynamics_model(bundles["base_motion_dynamics"])
+                base_motion_eval_dynamics = get_dynamics_model(base_bundle) if base_bundle is not None else None
 
                 solved_in_group = 0
                 for problem_index, problem in enumerate(tqdm(scene_problems, leave=False)):
@@ -1614,7 +1662,7 @@ def main() -> int:
                         break
                     solved_in_group += 1
 
-                    for method in METHODS:
+                    for method in curobo_methods:
                         bundle = bundles[method.name]
                         world = build_world(problem, mesh=args.mesh)
                         row = run_one_plan(
@@ -1631,8 +1679,8 @@ def main() -> int:
                                 "group": group_name,
                                 "group_index": group_index,
                                 "problem_index": problem_index,
-                                "base_motion_dt": base_bundle.base_dt,
-                                "base_motion_horizon": base_bundle.base_horizon,
+                                "base_motion_dt": base_bundle.base_dt if base_bundle is not None else float("nan"),
+                                "base_motion_horizon": base_bundle.base_horizon if base_bundle is not None else 0,
                             }
                         )
                         all_rows.append(row)
@@ -1659,7 +1707,7 @@ def main() -> int:
                         group_rows.append(row)
 
                 if not args.kpi:
-                    for method in METHODS:
+                    for method in curobo_methods:
                         method_group_rows = [
                             row for row in group_rows if row["method"] == method.name
                         ]
