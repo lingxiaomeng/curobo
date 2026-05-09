@@ -167,3 +167,5 @@ docker/pkgs/*
 !docs/images/*.svg
 benchmark/benchmark
 benchmark/*.urdf
+
+log/

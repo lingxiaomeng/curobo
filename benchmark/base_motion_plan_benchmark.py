@@ -50,7 +50,6 @@ from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
 from curobo._src.types.robot import RobotCfg
 from curobo._src.types.tool_pose import GoalToolPose
-from curobo._src.util.benchmark_metrics import CuroboGroupMetrics, CuroboMetrics
 from curobo._src.util.logging import setup_curobo_logger
 from curobo._src.util_file import (
     get_robot_configs_path,
@@ -101,23 +100,12 @@ METHODS = (
     MethodSpec("base_motion_dynamics", load_dynamics=True, use_base_motion=True),
 )
 MPC_METHOD = MethodSpec("mpc_python", load_dynamics=True, use_base_motion=True)
-ALL_METHOD_NAMES = tuple(method.name for method in METHODS) + (MPC_METHOD.name,)
 
 PANDA_TORQUE_LIMITS_NM = (87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0)
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 PANDA_NMPC_SCRIPTS = WORKSPACE_ROOT / "src" / "panda_nmpc" / "scripts"
-DEFAULT_MPC_CONFIG = (
-    WORKSPACE_ROOT / "src" / "panda_nmpc" / "config" / "base_frame_numeric_sim.yaml"
-)
-DEFAULT_MPC_COLLISION_LINKS = (
-    "panda_link1_0",
-    "panda_link2_0",
-    "panda_link3_0",
-    "panda_link4_0",
-    "panda_link5_0",
-    "panda_link6_0",
-    "panda_link7_0",
-    "panda_hand_0",
+DEFAULT_BENCHMARK_CONFIG = (
+    Path(__file__).resolve().parent / "config" / "base_motion_plan_benchmark.yaml"
 )
 
 
@@ -525,11 +513,7 @@ def compute_dynamics_metrics(
     """
     if dynamics_model is None or trajectory.velocity is None:
         return {
-            "energy": 0.0,
-            "max_torque": 0.0,
             "torque_violation": False,
-            "torques": None,
-            "power": None,
             "energy_j": float("nan"),
             "positive_energy_j": float("nan"),
             "max_abs_tau_nm": float("nan"),
@@ -567,11 +551,7 @@ def compute_dynamics_metrics(
         max_tau_ratio = torch.max(tau_limit_ratio)
         rms_tau = torch.sqrt(torch.mean(tau * tau))
     return {
-        "energy": float(energy.item()),
-        "max_torque": float(max_abs_tau.item()),
         "torque_violation": bool(torque_violation),
-        "torques": tau,
-        "power": power,
         "energy_j": float(energy.item()),
         "positive_energy_j": float(positive_energy.item()),
         "max_abs_tau_nm": float(max_abs_tau.item()),
@@ -657,14 +637,10 @@ def align_trajectory_for_kinematics(planner: MotionPlanner, trajectory: JointSta
     )
 
 
-def reshape_trajectory_for_kinematics(trajectory: JointState) -> JointState:
-    return reshape_trajectory_to_bhd(trajectory)
-
-
 def eef_path_lengths(planner: MotionPlanner, trajectory: JointState) -> Tuple[float, float]:
     try:
         fk_trajectory = align_trajectory_for_kinematics(planner, trajectory)
-        fk_trajectory = reshape_trajectory_for_kinematics(fk_trajectory)
+        fk_trajectory = reshape_trajectory_to_bhd(fk_trajectory)
         fk_state = planner.compute_kinematics(fk_trajectory)
         tool_pose = fk_state.tool_poses.get_link_pose(planner.tool_frames[0])
         position = tool_pose.position.reshape(1, -1, 3)
@@ -754,38 +730,24 @@ def make_empty_result_row(
 ) -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "method": method_name,
-        "skip": 0,
         "success": 0,
         "collision": 0,
         "joint_limit_violation": 0,
-        "self_collision": 0,
-        "physical_violation": 0,
         "torque_violation": 0,
         "dynamics_success": 0,
-        "payload_success": 0,
-        "perception_success": 0,
-        "perception_interpolated_success": 0,
         "eval_payload_mass_kg": args.mass,
         "wall_time_s": float("nan"),
         "total_time_s": float("nan"),
         "solve_time_s": float("nan"),
-        "time": float("nan"),
-        "solve_time": float("nan"),
-        "perception_time": 0.0,
         "position_error_mm": float("nan"),
         "orientation_error_deg": float("nan"),
-        "position_error": float("nan"),
-        "orientation_error": float("nan"),
         "motion_time_s": float("nan"),
-        "motion_time": float("nan"),
         "attempts": 1,
         "trajectory_length": 1,
         "eef_position_path_length": float("nan"),
         "eef_orientation_path_length": float("nan"),
         "cspace_path_length_rad": float("nan"),
-        "cspace_path_length": float("nan"),
         "max_abs_jerk": float("nan"),
-        "jerk": float("nan"),
         "base_motion_eval_energy_j": float("nan"),
         "base_motion_eval_positive_energy_j": float("nan"),
         "base_motion_eval_max_abs_tau_nm": float("nan"),
@@ -794,19 +756,6 @@ def make_empty_result_row(
         "base_motion_eval_work_j": float("nan"),
         "base_motion_eval_peak_power_w": float("nan"),
         "base_motion_eval_max_tau_ratio": float("nan"),
-        "moving_eval_energy_j": float("nan"),
-        "moving_eval_positive_energy_j": float("nan"),
-        "moving_eval_max_abs_tau_nm": float("nan"),
-        "moving_eval_rms_tau_nm": float("nan"),
-        "moving_eval_mean_abs_power_w": float("nan"),
-        "moving_eval_work_j": float("nan"),
-        "moving_eval_peak_power_w": float("nan"),
-        "energy": float("nan"),
-        "torque": float("nan"),
-        "power": float("nan"),
-        "work": float("nan"),
-        "peak_power": float("nan"),
-        "max_tau_ratio": float("nan"),
         "status": "failure",
     }
     for joint_name in joint_names:
@@ -947,28 +896,19 @@ def run_one_mpc_plan(
                 "success": int(success),
                 "collision": int(collision),
                 "joint_limit_violation": int(joint_limit_violation),
-                "physical_violation": int(torque_violation),
                 "torque_violation": int(torque_violation),
                 "dynamics_success": int(not torque_violation and not joint_limit_violation),
-                "payload_success": int(not torque_violation and not joint_limit_violation),
                 "wall_time_s": wall_time,
                 "total_time_s": wall_time,
                 "solve_time_s": solve_time,
-                "time": wall_time,
-                "solve_time": solve_time,
                 "position_error_mm": float(position_errors[-1] * 1000.0),
                 "orientation_error_deg": float(orientation_error * 180.0 / math.pi),
-                "position_error": float(position_errors[-1] * 1000.0),
-                "orientation_error": float(orientation_error * 180.0 / math.pi),
                 "motion_time_s": dt * max(0, len(xs) - 1),
-                "motion_time": dt * max(0, len(xs) - 1),
                 "trajectory_length": len(xs),
                 "eef_position_path_length": eef_position_length,
                 "eef_orientation_path_length": float("nan"),
                 "cspace_path_length_rad": cspace_length,
-                "cspace_path_length": cspace_length,
                 "max_abs_jerk": float(np.max(np.abs(jerk))) if jerk.size else 0.0,
-                "jerk": float(np.max(np.abs(jerk))) if jerk.size else 0.0,
                 "base_motion_eval_energy_j": energy,
                 "base_motion_eval_positive_energy_j": positive_energy,
                 "base_motion_eval_max_abs_tau_nm": max_tau,
@@ -977,19 +917,6 @@ def run_one_mpc_plan(
                 "base_motion_eval_work_j": work,
                 "base_motion_eval_peak_power_w": peak_power,
                 "base_motion_eval_max_tau_ratio": float(np.max(tau_limit_ratio)),
-                "moving_eval_energy_j": energy,
-                "moving_eval_positive_energy_j": positive_energy,
-                "moving_eval_max_abs_tau_nm": max_tau,
-                "moving_eval_rms_tau_nm": rms_tau,
-                "moving_eval_mean_abs_power_w": mean_abs_power,
-                "moving_eval_work_j": work,
-                "moving_eval_peak_power_w": peak_power,
-                "energy": energy,
-                "torque": max_tau,
-                "power": mean_abs_power,
-                "work": work,
-                "peak_power": peak_power,
-                "max_tau_ratio": float(np.max(tau_limit_ratio)),
                 "min_collision_distance_m": min_collision_distance,
                 "status": "success" if success else "mpc_constraint_or_goal_failure",
             }
@@ -1032,38 +959,24 @@ def run_one_plan(
 
     row: Dict[str, Any] = {
         "method": bundle.method.name,
-        "skip": 0,
         "success": 0,
         "collision": 0,
         "joint_limit_violation": 0,
-        "self_collision": 0,
-        "physical_violation": 0,
         "torque_violation": 0,
         "dynamics_success": 0,
-        "payload_success": 0,
-        "perception_success": 0,
-        "perception_interpolated_success": 0,
         "eval_payload_mass_kg": args.mass,
         "wall_time_s": wall_time,
         "total_time_s": float("nan"),
         "solve_time_s": float("nan"),
-        "time": float("nan"),
-        "solve_time": float("nan"),
-        "perception_time": 0.0,
         "position_error_mm": float("nan"),
         "orientation_error_deg": float("nan"),
-        "position_error": float("nan"),
-        "orientation_error": float("nan"),
         "motion_time_s": float("nan"),
-        "motion_time": float("nan"),
         "attempts": 1,
         "trajectory_length": 1,
         "eef_position_path_length": float("nan"),
         "eef_orientation_path_length": float("nan"),
         "cspace_path_length_rad": float("nan"),
-        "cspace_path_length": float("nan"),
         "max_abs_jerk": float("nan"),
-        "jerk": float("nan"),
         "base_motion_eval_energy_j": float("nan"),
         "base_motion_eval_positive_energy_j": float("nan"),
         "base_motion_eval_max_abs_tau_nm": float("nan"),
@@ -1072,19 +985,6 @@ def run_one_plan(
         "base_motion_eval_work_j": float("nan"),
         "base_motion_eval_peak_power_w": float("nan"),
         "base_motion_eval_max_tau_ratio": float("nan"),
-        "moving_eval_energy_j": float("nan"),
-        "moving_eval_positive_energy_j": float("nan"),
-        "moving_eval_max_abs_tau_nm": float("nan"),
-        "moving_eval_rms_tau_nm": float("nan"),
-        "moving_eval_mean_abs_power_w": float("nan"),
-        "moving_eval_work_j": float("nan"),
-        "moving_eval_peak_power_w": float("nan"),
-        "energy": float("nan"),
-        "torque": float("nan"),
-        "power": float("nan"),
-        "work": float("nan"),
-        "peak_power": float("nan"),
-        "max_tau_ratio": float("nan"),
         "status": "failure",
     }
     for joint_name in planner.joint_names:
@@ -1097,8 +997,6 @@ def run_one_plan(
 
     row["total_time_s"] = scalar(result.total_time)
     row["solve_time_s"] = scalar(result.solve_time)
-    row["time"] = row["total_time_s"]
-    row["solve_time"] = row["solve_time_s"]
     if not bool(result.success.item()):
         row["status"] = str(getattr(result, "status", "failure"))
         return row
@@ -1120,23 +1018,16 @@ def run_one_plan(
     row.update(
         {
             "success": 1,
-            "physical_violation": torque_violation,
             "torque_violation": torque_violation,
             "dynamics_success": dynamics_success,
-            "payload_success": dynamics_success,
             "position_error_mm": position_error_mm,
             "orientation_error_deg": orientation_error_deg,
-            "position_error": position_error_mm,
-            "orientation_error": orientation_error_deg,
             "motion_time_s": motion_time_s,
-            "motion_time": motion_time_s,
             "trajectory_length": int(trajectory.position.shape[-2]),
             "eef_position_path_length": eef_position_length,
             "eef_orientation_path_length": eef_orientation_length,
             "cspace_path_length_rad": cspace_length,
-            "cspace_path_length": cspace_length,
             "max_abs_jerk": jerk,
-            "jerk": jerk,
             "base_motion_eval_energy_j": base_motion_metrics["energy_j"],
             "base_motion_eval_positive_energy_j": base_motion_metrics["positive_energy_j"],
             "base_motion_eval_max_abs_tau_nm": base_motion_metrics["max_abs_tau_nm"],
@@ -1145,19 +1036,6 @@ def run_one_plan(
             "base_motion_eval_work_j": base_motion_metrics["work_j"],
             "base_motion_eval_peak_power_w": base_motion_metrics["peak_power_w"],
             "base_motion_eval_max_tau_ratio": base_motion_metrics["max_tau_ratio"],
-            "moving_eval_energy_j": base_motion_metrics["energy_j"],
-            "moving_eval_positive_energy_j": base_motion_metrics["positive_energy_j"],
-            "moving_eval_max_abs_tau_nm": base_motion_metrics["max_abs_tau_nm"],
-            "moving_eval_rms_tau_nm": base_motion_metrics["rms_tau_nm"],
-            "moving_eval_mean_abs_power_w": base_motion_metrics["mean_abs_power_w"],
-            "moving_eval_work_j": base_motion_metrics["work_j"],
-            "moving_eval_peak_power_w": base_motion_metrics["peak_power_w"],
-            "energy": base_motion_metrics["energy_j"],
-            "torque": base_motion_metrics["max_abs_tau_nm"],
-            "power": base_motion_metrics["mean_abs_power_w"],
-            "work": base_motion_metrics["work_j"],
-            "peak_power": base_motion_metrics["peak_power_w"],
-            "max_tau_ratio": base_motion_metrics["max_tau_ratio"],
             "status": "success",
         }
     )
@@ -1202,37 +1080,21 @@ def summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         "wall_time_s",
         "total_time_s",
         "solve_time_s",
-        "time",
-        "solve_time",
         "motion_time_s",
-        "motion_time",
         "eef_position_path_length",
         "eef_orientation_path_length",
         "cspace_path_length_rad",
-        "cspace_path_length",
         "max_abs_jerk",
-        "jerk",
         "base_motion_eval_energy_j",
+        "base_motion_eval_positive_energy_j",
         "base_motion_eval_max_abs_tau_nm",
+        "base_motion_eval_rms_tau_nm",
         "base_motion_eval_mean_abs_power_w",
         "base_motion_eval_work_j",
         "base_motion_eval_peak_power_w",
         "base_motion_eval_max_tau_ratio",
-        "moving_eval_energy_j",
-        "moving_eval_max_abs_tau_nm",
-        "moving_eval_mean_abs_power_w",
-        "moving_eval_work_j",
-        "moving_eval_peak_power_w",
-        "energy",
-        "torque",
-        "power",
-        "work",
-        "peak_power",
-        "max_tau_ratio",
         "position_error_mm",
         "orientation_error_deg",
-        "position_error",
-        "orientation_error",
     ]
     for method in methods:
         method_rows = [row for row in rows if row["method"] == method]
@@ -1252,8 +1114,6 @@ def summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "kinematic_success_rate": len(success_rows) / max(1, len(method_rows)),
             "dynamics_successes": len(dynamics_success_rows),
             "dynamics_success_rate": len(dynamics_success_rows) / max(1, len(method_rows)),
-            "payload_successes": len(dynamics_success_rows),
-            "payload_success_rate": len(dynamics_success_rows) / max(1, len(method_rows)),
             "torque_violations": len(torque_violation_rows),
             "torque_violation_rate": len(torque_violation_rows) / max(1, len(success_rows)),
         }
@@ -1266,172 +1126,27 @@ def summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return summary_rows
 
 
-def finite_or_inf(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return float("inf")
-    return number if math.isfinite(number) else float("inf")
-
-
-def row_to_curobo_metrics(row: Dict[str, Any]) -> CuroboMetrics:
-    return CuroboMetrics(
-        skip=bool(int(row.get("skip", 0))),
-        success=bool(int(row.get("success", 0))),
-        collision=bool(int(row.get("collision", 0))),
-        joint_limit_violation=bool(int(row.get("joint_limit_violation", 0))),
-        self_collision=bool(int(row.get("self_collision", 0))),
-        physical_violation=bool(int(row.get("physical_violation", 0))),
-        payload_success=bool(int(row.get("dynamics_success", row.get("payload_success", 0)))),
-        perception_success=bool(int(row.get("perception_success", 0))),
-        perception_interpolated_success=bool(
-            int(row.get("perception_interpolated_success", 0))
-        ),
-        position_error=finite_or_inf(row.get("position_error")),
-        orientation_error=finite_or_inf(row.get("orientation_error")),
-        eef_position_path_length=finite_or_inf(row.get("eef_position_path_length")),
-        eef_orientation_path_length=finite_or_inf(row.get("eef_orientation_path_length")),
-        cspace_path_length=finite_or_inf(row.get("cspace_path_length")),
-        trajectory_length=max(1, int(row.get("trajectory_length", 1))),
-        attempts=int(row.get("attempts", 1)),
-        motion_time=finite_or_inf(row.get("motion_time")),
-        solve_time=finite_or_inf(row.get("solve_time")),
-        time=finite_or_inf(row.get("time")),
-        perception_time=finite_or_inf(row.get("perception_time", 0.0)),
-        jerk=finite_or_inf(row.get("jerk")),
-        energy=finite_or_inf(row.get("energy")),
-        torque=finite_or_inf(row.get("torque")),
-        power=finite_or_inf(row.get("power")),
-        work=finite_or_inf(row.get("work")),
-        peak_power=finite_or_inf(row.get("peak_power")),
-    )
-
-
-def curobo_group_metrics(rows: List[Dict[str, Any]]) -> CuroboGroupMetrics:
-    return CuroboGroupMetrics.from_list([row_to_curobo_metrics(row) for row in rows])
-
-
 def print_group_line(group_name: str, method_name: str, rows: List[Dict[str, Any]]) -> None:
     if not rows:
         return
-    g_m = curobo_group_metrics(rows)
-    dynamics_success_rate = (
-        100.0
-        * sum(int(row.get("dynamics_success", 0)) for row in rows)
-        / max(1, len(rows))
-    )
+    success_rate = 100.0 * sum(int(row["success"]) for row in rows) / len(rows)
+    dynamics_success_rate = 100.0 * sum(int(row["dynamics_success"]) for row in rows) / len(rows)
+    wall_time = finite_values(rows, "wall_time_s")
+    position_error = finite_values(rows, "position_error_mm")
+    orientation_error = finite_values(rows, "orientation_error_deg")
+    cspace_length = finite_values(rows, "cspace_path_length_rad")
+    motion_times = finite_values(rows, "motion_time_s")
     print(
-        group_name,
-        method_name,
-        f"{g_m.success:2.2f}",
-        f"{dynamics_success_rate:2.2f}",
-        f"{g_m.time.mean:2.2f}",
-        f"{g_m.time.percent_98:2.2f}",
-        f"{g_m.position_error.percent_98:2.4f}",
-        f"{g_m.orientation_error.percent_98:2.4f}",
-        f"{g_m.cspace_path_length.percent_98:2.2f}",
-        f"{g_m.motion_time.percent_98:2.2f}",
+        f"{group_name} {method_name}: "
+        f"success={success_rate:.2f}%, "
+        f"dynamics={dynamics_success_rate:.2f}%, "
+        f"wall_mean={mean_or_nan(wall_time):.3f}s, "
+        f"wall_p98={percentile_or_nan(wall_time, 98.0):.3f}s, "
+        f"pos_p98={percentile_or_nan(position_error, 98.0):.3f}mm, "
+        f"ori_p98={percentile_or_nan(orientation_error, 98.0):.3f}deg, "
+        f"path_p98={percentile_or_nan(cspace_length, 98.0):.3f}rad, "
+        f"motion_p98={percentile_or_nan(motion_times, 98.0):.3f}s"
     )
-    print(g_m.attempts)
-
-
-def statistic_yaml(statistic) -> Dict[str, float]:
-    return {
-        "mean": float(statistic.mean),
-        "std": float(statistic.std),
-        "median": float(statistic.median),
-        "75th": float(statistic.percent_75),
-        "98th": float(statistic.percent_98),
-    }
-
-
-def benchmark_table_data(g_m: CuroboGroupMetrics) -> Dict[str, Any]:
-    return {
-        "Kinematic Success": float(g_m.success),
-        "Dynamics Success": float(g_m.payload_success),
-        "Physical Violation": float(g_m.physical_violation_rate),
-        "Planning Time": statistic_yaml(g_m.time),
-        "Position Error (mm)": statistic_yaml(g_m.position_error),
-        "Orientation Error (deg)": statistic_yaml(g_m.orientation_error),
-        "Path Length (rad.)": statistic_yaml(g_m.cspace_path_length),
-        "Motion Time(s)": statistic_yaml(g_m.motion_time),
-        "Jerk": statistic_yaml(g_m.jerk),
-        "Energy (J)": statistic_yaml(g_m.energy),
-        "Torque (N·m)": statistic_yaml(g_m.torque),
-        "Solve Time (s)": statistic_yaml(g_m.solve_time),
-    }
-
-
-def print_motion_plan_style_summary(
-    rows: List[Dict[str, Any]],
-    args: argparse.Namespace,
-) -> None:
-    method_names = args.methods
-    all_tables: Dict[str, Any] = {}
-
-    try:
-        from tabulate import tabulate
-    except ImportError:
-        tabulate = None
-
-    for method_name in method_names:
-        method_rows = [row for row in rows if row["method"] == method_name]
-        if not method_rows:
-            continue
-        g_m = curobo_group_metrics(method_rows)
-        all_tables[method_name] = benchmark_table_data(g_m)
-
-        if args.kpi:
-            continue
-        if tabulate is not None:
-            table = [
-                ["Kinematic Success %", f"{g_m.success:2.2f}"],
-                ["Dynamics Success %", f"{g_m.payload_success:2.2f}"],
-                ["Physical Violation %", f"{g_m.physical_violation_rate:2.2f}"],
-                ["Plan Time (s)", g_m.time],
-                ["Solve Time (s)", g_m.solve_time],
-                ["Position Error (mm)", g_m.position_error],
-                ["Path Length (rad.)", g_m.cspace_path_length],
-                ["Motion Time(s)", g_m.motion_time],
-                ["Jerk", g_m.jerk],
-                ["Energy (J)", g_m.energy],
-                ["Torque (N·m)", g_m.torque],
-            ]
-            print(method_name)
-            print(tabulate(table, ["Metric", "Value"], tablefmt="grid"))
-        else:
-            print("######## FULL SET ############")
-            print(method_name, f"{g_m.success:2.2f}", f"{g_m.payload_success:2.2f}")
-            print("MT: ", g_m.motion_time)
-            print("path-length: ", g_m.cspace_path_length)
-            print("PT:", g_m.time)
-            print("ST: ", g_m.solve_time)
-            print("position error (mm): ", g_m.position_error)
-            print("orientation error(%): ", g_m.orientation_error)
-            print("jerk: ", g_m.jerk)
-
-    if args.write_benchmark:
-        out_path = join_path("benchmark/log", "table_" + args.file_name + ".yml")
-        print(out_path)
-        write_yaml(all_tables, out_path)
-
-    if args.kpi:
-        kpi_data = {}
-        for method_name in method_names:
-            method_rows = [row for row in rows if row["method"] == method_name]
-            if not method_rows:
-                continue
-            g_m = curobo_group_metrics(method_rows)
-            kpi_data[method_name] = {
-                "Kinematic Success": g_m.success,
-                "Dynamics Success": g_m.payload_success,
-                "Planning Time": float(g_m.time.mean),
-                "Planning Time Std": float(g_m.time.std),
-                "Planning Time Median": float(g_m.time.median),
-                "Planning Time 75th": float(g_m.time.percent_75),
-                "Planning Time 98th": float(g_m.time.percent_98),
-            }
-        write_yaml(kpi_data, join_path(args.save_path, args.file_name + ".yml"))
 
 
 def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -1455,136 +1170,58 @@ def print_summary(summary_rows: List[Dict[str, Any]]) -> None:
         print(
             "{method}: success_rate={success_rate:.3f}, "
             "mean_wall={wall_time_s_mean:.4f}s, "
-            "moving_energy={moving_eval_energy_j_mean:.3f}J, "
-            "moving_max_tau={moving_eval_max_abs_tau_nm_mean:.3f}Nm".format(**row)
+            "energy={base_motion_eval_energy_j_mean:.3f}J, "
+            "max_tau={base_motion_eval_max_abs_tau_nm_mean:.3f}Nm".format(**row)
         )
+
+
+def resolve_config_path(config_dir: Path, value: Optional[str | Path]) -> Optional[Path]:
+    if value is None:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (config_dir / path).resolve()
+
+
+def load_benchmark_config(path: Path) -> argparse.Namespace:
+    config = load_yaml(str(path))
+    config_dir = path.resolve().parent
+    config["output_prefix"] = resolve_config_path(config_dir, config["output_prefix"])
+    config["mpc_config"] = resolve_config_path(config_dir, config["mpc_config"])
+    return argparse.Namespace(**config)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare cuRobo planning with no dynamics, fixed-base dynamics, and random base motion dynamics.",
+        description="Config-driven moving-base motion planning benchmark.",
     )
-    parser.add_argument(
-        "--dataset",
-        choices=["motion_benchmaker", "mpinets", "demo", "all"],
-        default="motion_benchmaker",
-    )
-    parser.add_argument(
-        "--methods",
-        nargs="+",
-        choices=ALL_METHOD_NAMES,
-        default=list(ALL_METHOD_NAMES),
-        help="Planner methods to run. Use this to avoid running every variant during iteration.",
-    )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Apply a fast smoke-test preset unless the corresponding limits were explicitly set.",
-    )
-    parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="When True, runs only on small dataaset",
-        default=False,
-    )
-    parser.add_argument("--output-prefix", type=Path, default=Path("benchmark/log/base_motion_plan"))
-    parser.add_argument(
-        "--save_path",
-        type=str,
-        default=".",
-        help="path to save KPI file",
-    )
-    parser.add_argument(
-        "--file_name",
-        type=str,
-        default="base_motion_plan",
-        help="File name prefix to use to save benchmark results",
-    )
-    parser.add_argument(
-        "--kpi",
-        action="store_true",
-        help="When True, saves minimal metrics",
-        default=False,
-    )
-    parser.add_argument(
-        "--write_benchmark",
-        action="store_true",
-        help="When True, writes benchmark summary table YAML",
-        default=False,
-    )
-    parser.add_argument("--max-groups", type=int, default=0, help="0 means all groups.")
-    parser.add_argument("--max-problems-per-group", type=int, default=0, help="0 means all problems.")
-    parser.add_argument("--seed", type=int, default=2)
-    parser.add_argument("--ik-seeds", type=int, default=32)
-    parser.add_argument("--trajopt-seeds", type=int, default=4)
-    parser.add_argument("--max-attempts", type=int, default=100)
-    parser.add_argument("--enable-graph-attempt", type=int, default=1)
-    parser.add_argument("--warmup-iters", type=int, default=3)
-    parser.add_argument("--collision-activation-distance", type=float, default=0.0025)
-    parser.add_argument("--mass", type=float, default=3.0)
-    parser.add_argument("--mesh", action="store_true")
-    parser.add_argument("--graph", action="store_true")
-    parser.add_argument("--disable-cuda-graph", "--disable_cuda_graph", action="store_true")
-    parser.add_argument("--base-motion-dt", type=float, default=None)
-    parser.add_argument("--base-angle-amp-deg", type=float, default=15.0)
-    parser.add_argument("--base-yaw-scale", type=float, default=0.5)
-    parser.add_argument("--base-linear-amp-m", type=float, default=0.2)
-    parser.add_argument("--base-freq-min", type=float, default=0.30)
-    parser.add_argument("--base-freq-max", type=float, default=1.0)
-    parser.add_argument(
-        "--skip-mpc",
-        action="store_true",
-        help="Deprecated alias: remove mpc_python from --methods.",
-    )
-    parser.add_argument("--mpc-config", type=Path, default=DEFAULT_MPC_CONFIG)
-    parser.add_argument("--mpc-horizon", type=int, default=0, help="0 keeps the YAML horizon.")
-    parser.add_argument("--mpc-dt", type=float, default=0.0, help="0 keeps the YAML dt_ocp.")
-    parser.add_argument(
-        "--mpc-iterations",
-        type=int,
-        default=0,
-        help="0 keeps the YAML nb_iterations_max.",
-    )
-    parser.add_argument(
-        "--mpc-max-qp-iter",
-        type=int,
-        default=0,
-        help="0 keeps the YAML max_qp_iter.",
-    )
-    parser.add_argument("--mpc-ee-frame", type=str, default=None)
-    parser.add_argument("--mpc-position-tolerance", type=float, default=0.02)
-    parser.add_argument("--mpc-orientation-tolerance", type=float, default=0.10)
-    parser.add_argument("--mpc-collision-safety-margin", type=float, default=None)
-    parser.add_argument(
-        "--mpc-collision-links",
-        nargs="+",
-        default=list(DEFAULT_MPC_COLLISION_LINKS),
-        help="Pinocchio collision geometry names paired with benchmark obstacles.",
-    )
-    parser.add_argument(
-        "--mpc-ignore-unsupported-obstacles",
-        action="store_true",
-        help="Ignore obstacle types that cannot be converted to hppfcl primitives.",
-    )
-    args = parser.parse_args()
-    if args.skip_mpc:
-        args.methods = [method for method in args.methods if method != MPC_METHOD.name]
-    if args.quick:
-        if args.dataset == "motion_benchmaker":
-            args.dataset = "demo"
-        if args.max_groups == 0:
-            args.max_groups = 1
-        if args.max_problems_per_group == 0:
-            args.max_problems_per_group = 2
-        args.ik_seeds = min(args.ik_seeds, 8)
-        args.trajopt_seeds = min(args.trajopt_seeds, 2)
-        args.max_attempts = min(args.max_attempts, 10)
-        args.warmup_iters = min(args.warmup_iters, 1)
-        args.mpc_horizon = args.mpc_horizon if args.mpc_horizon > 0 else 80
-        args.mpc_iterations = args.mpc_iterations if args.mpc_iterations > 0 else 5
-        args.mpc_max_qp_iter = args.mpc_max_qp_iter if args.mpc_max_qp_iter > 0 else 80
-    if not args.methods:
-        raise ValueError("No methods selected")
+    parser.add_argument("--config", type=Path, default=DEFAULT_BENCHMARK_CONFIG)
+    parser.add_argument("--dataset")
+    parser.add_argument("--methods", nargs="+")
+    parser.add_argument("--max-groups", type=int)
+    parser.add_argument("--max-problems-per-group", type=int)
+    parser.add_argument("--output-prefix", type=Path)
+    parser.add_argument("--mpc-horizon", type=int)
+    parser.add_argument("--mpc-iterations", type=int)
+    parser.add_argument("--mpc-max-qp-iter", type=int)
+    cli_args = parser.parse_args()
+
+    args = load_benchmark_config(cli_args.config)
+    for name in (
+        "dataset",
+        "methods",
+        "max_groups",
+        "max_problems_per_group",
+        "output_prefix",
+        "mpc_horizon",
+        "mpc_iterations",
+        "mpc_max_qp_iter",
+    ):
+        value = getattr(cli_args, name)
+        if value is not None:
+            setattr(args, name, value)
+    args.config = cli_args.config
     return args
 
 
@@ -1598,13 +1235,10 @@ def main() -> int:
         raise RuntimeError(
             "This benchmark requires CUDA. Activate the pink environment in a CUDA-enabled session."
         )
-    if args.base_freq_min <= 0.0 or args.base_freq_max < args.base_freq_min:
-        raise ValueError("Invalid base motion frequency range")
 
     setup_curobo_logger("error")
     set_seed(args.seed)
-    if not args.kpi:
-        print("*****RUN: 0")
+    print("*****RUN: 0")
 
     all_rows: List[Dict[str, Any]] = []
     datasets = get_datasets(args.dataset)
@@ -1706,17 +1340,16 @@ def main() -> int:
                         all_rows.append(row)
                         group_rows.append(row)
 
-                if not args.kpi:
-                    for method in curobo_methods:
-                        method_group_rows = [
-                            row for row in group_rows if row["method"] == method.name
-                        ]
-                        print_group_line(group_name, method.name, method_group_rows)
-                    if mpc_bundle is not None:
-                        method_group_rows = [
-                            row for row in group_rows if row["method"] == MPC_METHOD.name
-                        ]
-                        print_group_line(group_name, MPC_METHOD.name, method_group_rows)
+                for method in curobo_methods:
+                    method_group_rows = [
+                        row for row in group_rows if row["method"] == method.name
+                    ]
+                    print_group_line(group_name, method.name, method_group_rows)
+                if mpc_bundle is not None:
+                    method_group_rows = [
+                        row for row in group_rows if row["method"] == MPC_METHOD.name
+                    ]
+                    print_group_line(group_name, MPC_METHOD.name, method_group_rows)
             finally:
                 for bundle in bundles.values():
                     bundle.planner.destroy()
@@ -1728,7 +1361,7 @@ def main() -> int:
     write_csv(trial_path, all_rows)
     write_csv(summary_csv_path, summary_rows)
     write_yaml(summary_rows, str(summary_yaml_path))
-    print_motion_plan_style_summary(all_rows, args)
+    print_summary(summary_rows)
     print(f"Wrote trials to: {trial_path}")
     print(f"Wrote summary to: {summary_csv_path}")
     return 0

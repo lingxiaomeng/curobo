@@ -1,0 +1,58 @@
+methods: [curobo, mpc_python]
+output_prefix: ../benchmark/log/world_base_motion_reactive
+seed: 2
+tool_frame: panda_hand
+mass: 3.0
+
+simulation:
+  num_steps: 100
+  dt: 0.05
+  stop_on_goal: true
+
+base_motion:
+  frequency_hz: 0
+  translation_amp_m: [0.0, 0.0, 0.0]
+  rotation_amp_deg: [0.0, 0.0, 0.0]
+  phase_deg: [0.0, 90.0, 180.0, 0.0, 45.0, 90.0]
+
+curobo:
+  dt: 0.025
+  interpolation_steps: 4
+  warm_iters: 150
+  cold_iters: 250
+  run_ik: false
+  track_orientation: true
+  disable_cuda_graph: false
+  collision_activation_distance: 0.12
+  non_terminal_tool_pose_weight_factor: 0.001
+  position_tolerance: 0.01
+  orientation_tolerance: 0.10
+
+mpc:
+  config: ../../../panda_nmpc/config/base_frame_numeric_sim.yaml
+  horizon: 60
+  dt: 0.02
+  iterations: 5
+  max_qp_iter: 80
+  collision_safety_margin: 0.04
+  ignore_unsupported_obstacles: false
+  collision_links:
+    - panda_link1_0
+    - panda_link2_0
+    - panda_link3_0
+    - panda_link4_0
+    - panda_link5_0
+    - panda_link6_0
+    - panda_link7_0
+    - panda_hand_0
+
+scenes:
+  - name: single_box_corridor
+    start_q: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+    goal_world_pose_wxyz: [0.52, -0.34, 0.42, 0.0, 1.0, 0.0, 0.0]
+    goal_tolerance_m: 0.035
+    obstacles_world:
+      cuboid:
+        box_mid:
+          dims: [0.14, 0.14, 0.45]
+          pose: [0.45, -0.45, 0.28, 1.0, 0.0, 0.0, 0.0]

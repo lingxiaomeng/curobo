@@ -1,0 +1,50 @@
+dataset: motion_benchmaker
+methods:
+  - no_dynamics
+  - fixed_base_dynamics
+  - base_motion_dynamics
+
+demo: false
+output_prefix: ../benchmark/log/base_motion_plan
+
+max_groups: 0
+max_problems_per_group: 0
+seed: 2
+ik_seeds: 32
+trajopt_seeds: 4
+max_attempts: 100
+enable_graph_attempt: 1
+warmup_iters: 3
+
+collision_activation_distance: 0.0025
+mass: 3.0
+mesh: false
+graph: false
+disable_cuda_graph: false
+
+base_motion_dt:
+base_angle_amp_deg: 15.0
+base_yaw_scale: 0.5
+base_linear_amp_m: 0.2
+base_freq_min: 0.3
+base_freq_max: 0.6
+
+mpc_config: ../../../panda_nmpc/config/base_frame_numeric_sim.yaml
+mpc_horizon: 0
+mpc_dt: 0.0
+mpc_iterations: 0
+mpc_max_qp_iter: 0
+mpc_ee_frame:
+mpc_position_tolerance: 0.02
+mpc_orientation_tolerance: 0.10
+mpc_collision_safety_margin:
+mpc_ignore_unsupported_obstacles: false
+mpc_collision_links:
+  - panda_link1_0
+  - panda_link2_0
+  - panda_link3_0
+  - panda_link4_0
+  - panda_link5_0
+  - panda_link6_0
+  - panda_link7_0
+  - panda_hand_0
