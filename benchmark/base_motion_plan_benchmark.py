@@ -59,6 +59,15 @@ from curobo._src.util_file import (
     write_yaml,
 )
 
+from base_motion_visualizer import (
+    make_random_base_motion_poses,
+    extract_robot_trace_from_curobo,
+    extract_robot_mesh_trace_from_curobo,
+    render_moving_base_scene,
+)
+
+vis = True
+
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -249,6 +258,9 @@ def make_planner_bundle(
         store_debug=False,
         optimizer_collision_activation_distance=collision_activation_distance,
     )
+    visualize_trajectory_dt = float(getattr(args, "visualize_trajectory_dt", 0.0) or 0.0)
+    if visualize_trajectory_dt > 0.0:
+        planner_cfg.trajopt_solver_config.interpolation_dt = visualize_trajectory_dt
     planner = MotionPlanner(planner_cfg)
     if method.load_dynamics:
         planner.update_links_inertial({"attached_object": {"mass": args.mass}})
@@ -701,6 +713,7 @@ def make_mpc_bundle(base_seed: int, args: argparse.Namespace) -> MpcBundle:
         args.base_yaw_scale,
         args.base_linear_amp_m,
     )
+
     floating_model = mpc_module.load_floating_panda_model(config.robot_model.urdf_path)
     fixed_model = mpc_module.load_panda_model(config.robot_model.urdf_path)
     base_collision_model = mpc_module.pin.buildGeomFromUrdf(
@@ -939,6 +952,9 @@ def run_one_plan(
     base_motion_eval_dynamics,
     base_stats: Dict[str, float],
     args: argparse.Namespace,
+    base_poses_world: Optional[np.ndarray] = None,
+    base_motion_seed: Optional[int] = None,
+    viz_output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     planner = bundle.planner
     planner.scene_collision_checker.clear_cache()
@@ -1002,6 +1018,54 @@ def run_one_plan(
         return row
 
     trajectory = result.js_solution
+    
+    if viz_output_path is not None and base_poses_world is not None:
+        try:
+            viz_trajectory = result.get_interpolated_plan()
+            if viz_trajectory is None:
+                raise RuntimeError("result.get_interpolated_plan() returned None")
+            viz_horizon = int(viz_trajectory.position.shape[-2])
+            viz_dt = scalar(viz_trajectory.dt, default=0.0)
+            viz_base_poses_world = base_poses_world
+            if base_motion_seed is not None and viz_horizon > 0 and viz_dt > 0.0:
+                viz_base_poses_world = make_random_base_motion_poses(
+                    horizon=viz_horizon,
+                    dt=viz_dt,
+                    seed=base_motion_seed,
+                    base_freq_min=args.base_freq_min,
+                    base_freq_max=args.base_freq_max,
+                    base_angle_amp_deg=args.base_angle_amp_deg,
+                    base_yaw_scale=args.base_yaw_scale,
+                    base_linear_amp_m=args.base_linear_amp_m,
+                )
+            robot_trace = extract_robot_trace_from_curobo(
+                planner=planner,
+                trajectory=viz_trajectory,
+            )
+            robot_mesh_trace = extract_robot_mesh_trace_from_curobo(
+                planner=planner,
+                trajectory=viz_trajectory,
+            )
+            render_moving_base_scene(
+                problem=problem,
+                base_poses_world=viz_base_poses_world,
+                robot_trace_base=robot_trace,
+                robot_mesh_trace_base=robot_mesh_trace,
+                output_html=viz_output_path,
+                output_gif=viz_output_path.with_suffix(".gif") if getattr(args, "visualize_gif", False) else None,
+                title=str(viz_output_path.stem),
+                every_n=getattr(args, "visualize_every_n", 2),
+                frame_duration_ms=getattr(args, "visualize_frame_duration_ms", 33),
+                gif_width=getattr(args, "visualize_gif_width", 1280),
+                gif_height=getattr(args, "visualize_gif_height", 900),
+                gif_scale=getattr(args, "visualize_gif_scale", 1.0),
+                show_frames=True,
+                show_trajectory=True,
+                auto_open=False,
+            )
+        except Exception as exc:
+            print(f"[visualizer] failed to render {viz_output_path}: {type(exc).__name__}: {exc}")
+    
     torque_limits = get_torque_limits(planner, planner.joint_names)
     base_motion_metrics = compute_dynamics_metrics(
         base_motion_eval_dynamics, trajectory, planner.joint_names, torque_limits
@@ -1205,6 +1269,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mpc-horizon", type=int)
     parser.add_argument("--mpc-iterations", type=int)
     parser.add_argument("--mpc-max-qp-iter", type=int)
+    parser.add_argument("--visualize-every-n", type=int)
+    parser.add_argument("--visualize-frame-duration-ms", type=int)
+    parser.add_argument("--visualize-trajectory-dt", type=float)
+    parser.add_argument("--visualize-gif", action="store_true", default=None)
+    parser.add_argument("--visualize-gif-width", type=int)
+    parser.add_argument("--visualize-gif-height", type=int)
+    parser.add_argument("--visualize-gif-scale", type=float)
     cli_args = parser.parse_args()
 
     args = load_benchmark_config(cli_args.config)
@@ -1217,6 +1288,13 @@ def parse_args() -> argparse.Namespace:
         "mpc_horizon",
         "mpc_iterations",
         "mpc_max_qp_iter",
+        "visualize_every_n",
+        "visualize_frame_duration_ms",
+        "visualize_trajectory_dt",
+        "visualize_gif",
+        "visualize_gif_width",
+        "visualize_gif_height",
+        "visualize_gif_scale",
     ):
         value = getattr(cli_args, name)
         if value is not None:
@@ -1273,6 +1351,17 @@ def main() -> int:
                         args,
                     )
                     update_base_motion_buffer(base_bundle, base_velocity, base_acceleration)
+                    base_poses_world = make_random_base_motion_poses(
+                        horizon=base_bundle.base_horizon,
+                        dt=base_bundle.base_dt,
+                        seed=base_seed,
+                        base_freq_min=args.base_freq_min,
+                        base_freq_max=args.base_freq_max,
+                        base_angle_amp_deg=args.base_angle_amp_deg,
+                        base_yaw_scale=args.base_yaw_scale,
+                        base_linear_amp_m=args.base_linear_amp_m,
+                    )
+                
                 if run_mpc:
                     mpc_bundle = make_mpc_bundle(base_seed, args)
 
@@ -1299,14 +1388,27 @@ def main() -> int:
                     for method in curobo_methods:
                         bundle = bundles[method.name]
                         world = build_world(problem, mesh=args.mesh)
-                        row = run_one_plan(
-                            bundle,
-                            problem,
-                            world,
-                            base_motion_eval_dynamics,
-                            base_stats,
-                            args,
-                        )
+                        if vis:
+                            row = run_one_plan(
+                                bundle,
+                                problem,
+                                world,
+                                base_motion_eval_dynamics,
+                                base_stats,
+                                args,
+                                base_poses_world=base_poses_world if base_bundle is not None else None,
+                                base_motion_seed=base_seed if base_bundle is not None else None,
+                                viz_output_path=args.output_prefix / f"viz_{dataset_index}_{group_index}_{problem_index}_{method.name}.html",
+                            )
+                        else:
+                            row = run_one_plan(
+                                bundle,
+                                problem,
+                                world,
+                                base_motion_eval_dynamics,
+                                base_stats,
+                                args,
+                            )
                         row.update(
                             {
                                 "dataset": dataset_name,

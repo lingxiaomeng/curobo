@@ -1,4 +1,4 @@
-dataset: motion_benchmaker
+dataset: demo
 methods:
   - no_dynamics
   - fixed_base_dynamics
@@ -15,6 +15,13 @@ trajopt_seeds: 4
 max_attempts: 100
 enable_graph_attempt: 1
 warmup_iters: 3
+visualize_every_n: 1
+visualize_frame_duration_ms: 33
+visualize_trajectory_dt: 0.03
+visualize_gif: false
+visualize_gif_width: 1280
+visualize_gif_height: 900
+visualize_gif_scale: 1.0
 
 collision_activation_distance: 0.0025
 mass: 3.0
