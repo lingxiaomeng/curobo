@@ -161,6 +161,7 @@ def reactive_control(num_steps: int = 100):
     for step in range(num_steps):
         result = mpc.optimize_action_sequence(current_state)
 
+        print(result.solve_time)
         if result.action_sequence is not None and result.action_sequence.position.shape[1] > 0:
             next_position = result.action_sequence.position[:, -1, :]
             current_state = JointState.from_position(
