@@ -66,8 +66,6 @@ from base_motion_visualizer import (
     render_moving_base_scene,
 )
 
-vis = True
-
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -1059,6 +1057,8 @@ def run_one_plan(
                 gif_width=getattr(args, "visualize_gif_width", 1280),
                 gif_height=getattr(args, "visualize_gif_height", 900),
                 gif_scale=getattr(args, "visualize_gif_scale", 1.0),
+                gif_every_n=getattr(args, "visualize_gif_every_n", 1),
+                gif_max_frames=getattr(args, "visualize_gif_max_frames", 0),
                 show_frames=True,
                 show_trajectory=True,
                 auto_open=False,
@@ -1261,44 +1261,8 @@ def parse_args() -> argparse.Namespace:
         description="Config-driven moving-base motion planning benchmark.",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_BENCHMARK_CONFIG)
-    parser.add_argument("--dataset")
-    parser.add_argument("--methods", nargs="+")
-    parser.add_argument("--max-groups", type=int)
-    parser.add_argument("--max-problems-per-group", type=int)
-    parser.add_argument("--output-prefix", type=Path)
-    parser.add_argument("--mpc-horizon", type=int)
-    parser.add_argument("--mpc-iterations", type=int)
-    parser.add_argument("--mpc-max-qp-iter", type=int)
-    parser.add_argument("--visualize-every-n", type=int)
-    parser.add_argument("--visualize-frame-duration-ms", type=int)
-    parser.add_argument("--visualize-trajectory-dt", type=float)
-    parser.add_argument("--visualize-gif", action="store_true", default=None)
-    parser.add_argument("--visualize-gif-width", type=int)
-    parser.add_argument("--visualize-gif-height", type=int)
-    parser.add_argument("--visualize-gif-scale", type=float)
     cli_args = parser.parse_args()
-
     args = load_benchmark_config(cli_args.config)
-    for name in (
-        "dataset",
-        "methods",
-        "max_groups",
-        "max_problems_per_group",
-        "output_prefix",
-        "mpc_horizon",
-        "mpc_iterations",
-        "mpc_max_qp_iter",
-        "visualize_every_n",
-        "visualize_frame_duration_ms",
-        "visualize_trajectory_dt",
-        "visualize_gif",
-        "visualize_gif_width",
-        "visualize_gif_height",
-        "visualize_gif_scale",
-    ):
-        value = getattr(cli_args, name)
-        if value is not None:
-            setattr(args, name, value)
     args.config = cli_args.config
     return args
 
@@ -1388,7 +1352,7 @@ def main() -> int:
                     for method in curobo_methods:
                         bundle = bundles[method.name]
                         world = build_world(problem, mesh=args.mesh)
-                        if vis:
+                        if getattr(args, "vis", True):
                             row = run_one_plan(
                                 bundle,
                                 problem,

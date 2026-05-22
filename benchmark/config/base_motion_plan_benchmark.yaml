@@ -1,27 +1,30 @@
-dataset: demo
+dataset: motion_benchmaker
 methods:
-  - no_dynamics
-  - fixed_base_dynamics
+  # - no_dynamics
+  # - fixed_base_dynamics
   - base_motion_dynamics
 
 demo: false
 output_prefix: ../benchmark/log/base_motion_plan
 
 max_groups: 0
-max_problems_per_group: 0
+max_problems_per_group: 1
 seed: 2
 ik_seeds: 32
 trajopt_seeds: 4
 max_attempts: 100
 enable_graph_attempt: 1
 warmup_iters: 3
+vis: true
 visualize_every_n: 1
 visualize_frame_duration_ms: 33
 visualize_trajectory_dt: 0.03
-visualize_gif: false
-visualize_gif_width: 1280
-visualize_gif_height: 900
+visualize_gif: true
+visualize_gif_width: 960
+visualize_gif_height: 720
 visualize_gif_scale: 1.0
+visualize_gif_every_n: 3
+visualize_gif_max_frames: 80
 
 collision_activation_distance: 0.0025
 mass: 3.0

@@ -641,6 +641,8 @@ def render_moving_base_scene(
     gif_width: int = 1280,
     gif_height: int = 900,
     gif_scale: float = 1.0,
+    gif_every_n: int = 1,
+    gif_max_frames: int = 0,
     title: str = "Moving-base robot scene",
     show_frames: bool = True,
     show_trajectory: bool = True,
@@ -659,6 +661,8 @@ def render_moving_base_scene(
         gif_width: Exported GIF frame width in pixels.
         gif_height: Exported GIF frame height in pixels.
         gif_scale: Plotly static image scale for each exported GIF frame.
+        gif_every_n: Downsample exported GIF frames after HTML frames are built.
+        gif_max_frames: Maximum exported GIF frames; ``0`` keeps all selected frames.
         title: Figure title.
         show_frames: Draw small base axes for sampled frames.
         show_trajectory: Draw end-effector trajectory relative to the moving base.
@@ -779,16 +783,39 @@ def render_moving_base_scene(
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(output), include_plotlyjs="cdn", auto_open=auto_open)
     if output_gif is not None:
+        gif_frames, duration_scale = _select_gif_frames(frames, gif_every_n, gif_max_frames)
         _write_animation_gif(
             fig,
-            frames,
+            gif_frames,
             output_gif,
-            frame_duration_ms=frame_duration_ms,
+            frame_duration_ms=max(1, int(round(float(frame_duration_ms) * duration_scale))),
             width=gif_width,
             height=gif_height,
             scale=gif_scale,
         )
     return output
+
+
+def _select_gif_frames(
+    frames: Sequence[Any],
+    every_n: int,
+    max_frames: int,
+) -> Tuple[List[Any], float]:
+    if not frames:
+        return [], 1.0
+    stride = max(1, int(every_n))
+    selected = list(frames[::stride])
+    if selected[-1] is not frames[-1]:
+        selected.append(frames[-1])
+
+    if max_frames and max_frames > 1 and len(selected) > max_frames:
+        ids = np.linspace(0, len(selected) - 1, int(max_frames), dtype=int)
+        selected = [selected[int(i)] for i in np.unique(ids)]
+        if selected[-1] is not frames[-1]:
+            selected[-1] = frames[-1]
+
+    duration_scale = max(1.0, float(len(frames)) / float(max(1, len(selected))))
+    return selected, duration_scale
 
 
 def _write_animation_gif(
