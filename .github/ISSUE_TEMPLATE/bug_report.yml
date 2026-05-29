@@ -49,7 +49,7 @@ body:
       render: python
       placeholder: |
         import torch
-        from curobo.kinematics import Kinematics, KinematicsCfg
+        from curobo_floating_base.kinematics import Kinematics, KinematicsCfg
 
         kin = Kinematics(KinematicsCfg.from_robot_yaml_file("franka.yml"))
         # ... rest of the minimal example that triggers the bug ...
@@ -84,7 +84,7 @@ body:
     id: curobo_version
     attributes:
       label: cuRobo version + commit SHA
-      description: 'Output of `python -c "import curobo; print(curobo.__version__)"` and `git rev-parse --short HEAD` from your cloned cuRobo checkout.'
+      description: 'Output of `python -c "import curobo_floating_base; print(curobo_floating_base.__version__)"` and `git rev-parse --short HEAD` from your cloned cuRobo checkout.'
       placeholder: "e.g. 1.0.0  @ a1b2c3d"
     validations:
       required: true
@@ -112,7 +112,7 @@ body:
       label: Kernel backend
       description: |
         Which curobolib backend is in use? Check by running
-        `python -c "from curobo._src.curobolib.backends import get_backend_name; print(get_backend_name())"`,
+        `python -c "from curobo_floating_base._src.curobolib.backends import get_backend_name; print(get_backend_name())"`,
         or by inspecting the `CUROBO_KERNEL_BACKEND` environment variable.
       options:
         - cuda_core (default, runtime compilation)

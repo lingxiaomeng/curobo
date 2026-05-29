@@ -18,18 +18,18 @@ from torch.profiler import ProfilerActivity, profile
 from tqdm import tqdm
 
 # CuRobo
-from curobo._src.geom.types import Mesh, SceneCfg
-from curobo._src.motion import MotionPlanner, MotionPlannerCfg
-from curobo._src.state.state_joint import JointState
-from curobo._src.types.control_space import ControlSpace
-from curobo._src.types.device_cfg import DeviceCfg
-from curobo._src.types.pose import Pose
-from curobo._src.types.tool_pose import GoalToolPose
-from curobo._src.types.robot import RobotCfg
-from curobo._src.util.benchmark_metrics import CuroboGroupMetrics, CuroboMetrics
-from curobo._src.util.logging import setup_curobo_logger
-from curobo._src.util.usd_writer import UsdWriter
-from curobo._src.util_file import (
+from curobo_floating_base._src.geom.types import Mesh, SceneCfg
+from curobo_floating_base._src.motion import MotionPlanner, MotionPlannerCfg
+from curobo_floating_base._src.state.state_joint import JointState
+from curobo_floating_base._src.types.control_space import ControlSpace
+from curobo_floating_base._src.types.device_cfg import DeviceCfg
+from curobo_floating_base._src.types.pose import Pose
+from curobo_floating_base._src.types.tool_pose import GoalToolPose
+from curobo_floating_base._src.types.robot import RobotCfg
+from curobo_floating_base._src.util.benchmark_metrics import CuroboGroupMetrics, CuroboMetrics
+from curobo_floating_base._src.util.logging import setup_curobo_logger
+from curobo_floating_base._src.util.usd_writer import UsdWriter
+from curobo_floating_base._src.util_file import (
     get_assets_path,
     get_robot_configs_path,
     get_scene_configs_path,
@@ -65,7 +65,7 @@ def load_robot_model_for_dynamics(
     Returns:
         Tuple of (model, data, torque_limits)
     """
-    from curobo._src.types.robot import RobotCfg
+    from curobo_floating_base._src.types.robot import RobotCfg
 
     # Load robot configuration
     config_file = load_yaml(str(join_path(get_robot_configs_path(), robot_name + ".yml")))

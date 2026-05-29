@@ -4,7 +4,7 @@
 # Standard Library
 import argparse
 
-import curobo.runtime as runtime
+import curobo_floating_base.runtime as runtime
 
 runtime.enable_torch_compile = False
 runtime.enable_torch_jit = False
@@ -15,21 +15,21 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 # CuRobo
-from curobo._src.solver.solver_ik import IKSolver
-from curobo._src.solver.solver_ik_cfg import IKSolverCfg
-from curobo._src.state.state_joint import JointState
-from curobo._src.types.device_cfg import DeviceCfg
+from curobo_floating_base._src.solver.solver_ik import IKSolver
+from curobo_floating_base._src.solver.solver_ik_cfg import IKSolverCfg
+from curobo_floating_base._src.state.state_joint import JointState
+from curobo_floating_base._src.types.device_cfg import DeviceCfg
 
-from curobo._src.util.cuda_event_timer import CudaEventTimer
-from curobo._src.util.logging import setup_curobo_logger
+from curobo_floating_base._src.util.cuda_event_timer import CudaEventTimer
+from curobo_floating_base._src.util.logging import setup_curobo_logger
 
 # Enable CUDA event timing for accurate benchmark measurements
 runtime.enable_cuda_event_timer = True
-from curobo._src.util_file import (
+from curobo_floating_base._src.util_file import (
     join_path,
     write_yaml,
 )
-from curobo.content import (
+from curobo_floating_base.content import (
     get_robot_configs_path,
 )
 
@@ -46,7 +46,7 @@ torch._dynamo.config.cache_size_limit = 64
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-from curobo._src.util.config_io import join_path, resolve_config
+from curobo_floating_base._src.util.config_io import join_path, resolve_config
 
 
 def run_full_config_collision_free_ik(

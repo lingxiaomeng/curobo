@@ -15,12 +15,12 @@ docstring.
 - Follow flake8 rules from [setup.cfg](mdc:setup.cfg)
 - Use descriptive names for functions, classess and other members
 - Use type hints for all function signatures
-- Use logging functions from [logging.py](mdc:src/curobo/util/logging.py) for print and raising
+- Use logging functions from [logging.py](mdc:src/curobo_floating_base/util/logging.py) for print and raising
 warnigs, errors
 - Avoid using deprecated functions
 - Follow PEP 563 (Postponed Evaluation of Annotations)
 
 # Writing Tests
-- tests should be src/curobo/tests folder.
+- tests should be src/curobo_floating_base/tests folder.
 - Do not write unit tests for wp.kernel decorators.
 - When writing gradient checking using gradcheck, use float32 and not float64.

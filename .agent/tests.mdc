@@ -15,7 +15,7 @@ existing bug: https://github.com/coveragepy/coveragepy/issues/1925
 
 Instead use coverage. For e.g., to get coverage on _src:
 
-1. coverage run --source curobo/_src/ -m pytest curobo/test/_src
+1. coverage run --source curobo_floating_base/_src/ -m pytest curobo_floating_base/test/_src
 2. coverage report -m
 
 

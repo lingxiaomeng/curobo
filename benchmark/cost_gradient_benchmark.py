@@ -14,26 +14,26 @@ import pandas as pd
 import tabulate
 import torch
 
-import curobo.runtime as runtime
+import curobo_floating_base.runtime as runtime
 
 # Enable CUDA event timing for accurate benchmark measurements.
 runtime.cuda_event_timers = True
 
-from curobo._src.cost.cost_scene_collision import SceneCollisionCost
-from curobo._src.cost.cost_scene_collision_cfg import SceneCollisionCostCfg
-from curobo._src.cost.cost_self_collision import SelfCollisionCost
-from curobo._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
-from curobo._src.cost.cost_tool_pose import ToolPoseCost
-from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
-from curobo._src.geom.collision import SceneCollision, SceneCollisionCfg
-from curobo._src.geom.types import SceneCfg
-from curobo._src.robot.kinematics.kinematics import Kinematics, KinematicsCfg
-from curobo._src.state.state_joint import JointState
-from curobo._src.types.device_cfg import DeviceCfg
-from curobo._src.util.config_io import join_path, load_yaml, write_yaml
-from curobo._src.util.cuda_event_timer import CudaEventTimer
-from curobo._src.util.cuda_graph_util import create_graph_executor
-from curobo.content import get_robot_configs_path
+from curobo_floating_base._src.cost.cost_scene_collision import SceneCollisionCost
+from curobo_floating_base._src.cost.cost_scene_collision_cfg import SceneCollisionCostCfg
+from curobo_floating_base._src.cost.cost_self_collision import SelfCollisionCost
+from curobo_floating_base._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
+from curobo_floating_base._src.cost.cost_tool_pose import ToolPoseCost
+from curobo_floating_base._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
+from curobo_floating_base._src.geom.collision import SceneCollision, SceneCollisionCfg
+from curobo_floating_base._src.geom.types import SceneCfg
+from curobo_floating_base._src.robot.kinematics.kinematics import Kinematics, KinematicsCfg
+from curobo_floating_base._src.state.state_joint import JointState
+from curobo_floating_base._src.types.device_cfg import DeviceCfg
+from curobo_floating_base._src.util.config_io import join_path, load_yaml, write_yaml
+from curobo_floating_base._src.util.cuda_event_timer import CudaEventTimer
+from curobo_floating_base._src.util.cuda_graph_util import create_graph_executor
+from curobo_floating_base.content import get_robot_configs_path
 
 
 DEFAULT_ROBOTS = ["franka.yml", "dual_ur10e.yml", "unitree_g1.yml"]

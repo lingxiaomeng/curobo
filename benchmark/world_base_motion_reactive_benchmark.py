@@ -25,11 +25,11 @@ import numpy as np
 import torch
 import yaml
 
-from curobo._src.util.logging import setup_curobo_logger
-from curobo._src.util_file import get_robot_configs_path, join_path, load_yaml, write_yaml
-from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
-from curobo.model_predictive_control import ModelPredictiveControl, ModelPredictiveControlCfg
-from curobo.types import DeviceCfg, GoalToolPose, JointState, Pose
+from curobo_floating_base._src.util.logging import setup_curobo_logger
+from curobo_floating_base._src.util_file import get_robot_configs_path, join_path, load_yaml, write_yaml
+from curobo_floating_base._src.cost.tool_pose_criteria import ToolPoseCriteria
+from curobo_floating_base.model_predictive_control import ModelPredictiveControl, ModelPredictiveControlCfg
+from curobo_floating_base.types import DeviceCfg, GoalToolPose, JointState, Pose
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]

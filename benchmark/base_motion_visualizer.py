@@ -522,8 +522,8 @@ def extract_robot_mesh_trace_from_curobo(
     leaving the planner untouched.
     """
     try:
-        from curobo._src.robot.kinematics.kinematics import Kinematics
-        from curobo._src.robot.kinematics.kinematics_cfg import KinematicsCfg
+        from curobo_floating_base._src.robot.kinematics.kinematics import Kinematics
+        from curobo_floating_base._src.robot.kinematics.kinematics_cfg import KinematicsCfg
         from base_motion_plan_benchmark import align_trajectory_for_kinematics, reshape_trajectory_to_bhd  # type: ignore
 
         fk_trajectory = reshape_trajectory_to_bhd(

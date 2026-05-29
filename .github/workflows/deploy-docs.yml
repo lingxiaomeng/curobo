@@ -11,7 +11,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
-      - 'curobo/**'
+      - 'curobo_floating_base/**'
       - 'pyproject.toml'
       - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:

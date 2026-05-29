@@ -21,9 +21,9 @@ from urllib.parse import urlparse
 from sphinx.ext import apidoc
 
 # CuRobo
-import curobo
+import curobo_floating_base
 
-version = curobo.__version__
+version = curobo_floating_base.__version__
 release = version
 
 # -- Path setup --------------------------------------------------------------
@@ -36,7 +36,7 @@ release = version
 
 
 root = pathlib.Path(__file__).resolve().parent.parent
-# sys.path.insert(0, root / "curobo")
+# sys.path.insert(0, root / "curobo_floating_base")
 
 # -- Derive repo URL from git remote -----------------------------------------
 
@@ -89,13 +89,13 @@ author = "NVIDIA"
 # See Issue: https://github.com/[[rtfd/readthedocs.org/issues/1139
 
 output_dir = os.path.join(root, "docs", "api")
-module_dir = os.path.join(root, "curobo")
+module_dir = os.path.join(root, "curobo_floating_base")
 exclude_patterns = [
     module_dir + "/content",
     module_dir + "/test",
 ]
 
-import curobo._src.runtime as curobo_runtime
+import curobo_floating_base._src.runtime as curobo_runtime
 
 curobo_runtime.torch_compile = False
 os.environ["PYTORCH_JIT"] = "0"

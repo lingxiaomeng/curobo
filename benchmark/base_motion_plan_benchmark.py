@@ -42,16 +42,16 @@ from robometrics.datasets import demo_raw, motion_benchmaker_raw, mpinets_raw
 from tqdm import tqdm
 
 # cuRobo
-from curobo._src.geom.types import SceneCfg
-from curobo._src.motion import MotionPlanner, MotionPlannerCfg
-from curobo._src.state.state_joint import JointState
-from curobo._src.types.control_space import ControlSpace
-from curobo._src.types.device_cfg import DeviceCfg
-from curobo._src.types.pose import Pose
-from curobo._src.types.robot import RobotCfg
-from curobo._src.types.tool_pose import GoalToolPose
-from curobo._src.util.logging import setup_curobo_logger
-from curobo._src.util_file import (
+from curobo_floating_base._src.geom.types import SceneCfg
+from curobo_floating_base._src.motion import MotionPlanner, MotionPlannerCfg
+from curobo_floating_base._src.state.state_joint import JointState
+from curobo_floating_base._src.types.control_space import ControlSpace
+from curobo_floating_base._src.types.device_cfg import DeviceCfg
+from curobo_floating_base._src.types.pose import Pose
+from curobo_floating_base._src.types.robot import RobotCfg
+from curobo_floating_base._src.types.tool_pose import GoalToolPose
+from curobo_floating_base._src.util.logging import setup_curobo_logger
+from curobo_floating_base._src.util_file import (
     get_robot_configs_path,
     get_scene_configs_path,
     join_path,

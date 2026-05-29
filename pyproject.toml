@@ -6,7 +6,7 @@ requires = ["setuptools>=45", "setuptools_scm>=6.2", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nvidia-curobo"
+name = "nvidia-curobo-floating-base"
 dynamic = ["version"]
 description = "GPU robot motion toolkit containing cuda accelerated kinematics, IK, MPC, Global motion planning, and optimization solvers."
 readme = "README.md"
@@ -112,9 +112,9 @@ exclude = ["tests"]
 
 [tool.setuptools.package-data]
 # Include kernel source files for cuda.core runtime compilation
-"curobo._src.curobolib.kernels" = ["**/*.cu", "**/*.cuh", "**/*.h"]
+"curobo_floating_base._src.curobolib.kernels" = ["**/*.cu", "**/*.cuh", "**/*.h"]
 # Include pybind binding and launch files for optional pybind compilation
-"curobo._src.curobolib.backends.pybind" = ["*.cpp", "*.cu"]
+"curobo_floating_base._src.curobolib.backends.pybind" = ["*.cpp", "*.cu"]
 # Include compiled shared objects
 "*" = ["*.so"]
 
@@ -152,7 +152,7 @@ convention = "google"
 [tool.ruff.lint.isort]
 # Replicate isort configuration
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
-known-first-party = ["curobo"]
+known-first-party = ["curobo_floating_base"]
 
 
 [tool.setuptools_scm]
@@ -162,7 +162,7 @@ local_scheme = "dirty-tag"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-testpaths = ["curobo/tests"]
+testpaths = ["curobo_floating_base/tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -209,11 +209,11 @@ exclude_lines = [
 ]
 
 omit = [
-    "curobo/examples/*",
-    "curobo/tests/*",
-    "curobo/content",
-    "curobo/_src/curobolib/*",
-    "curobo/_src/cuda_robot_model/usd_kinematics_parser.py",
+    "curobo_floating_base/examples/*",
+    "curobo_floating_base/tests/*",
+    "curobo_floating_base/content",
+    "curobo_floating_base/_src/curobolib/*",
+    "curobo_floating_base/_src/cuda_robot_model/usd_kinematics_parser.py",
 ]
 
 [tool.interrogate]

@@ -30,7 +30,7 @@ When organizing code in this project, strictly follow these category-first file 
 
 5. **Import statements** should reflect this structure:
    ```python
-   from curobo.connectors.connector_linear import LinearConnector
+   from curobo_floating_base.connectors.connector_linear import LinearConnector
    ```
 
 ## Class Naming
@@ -48,9 +48,9 @@ this category-first naming convention. Consistency across the codebase is essent
 
 ### Where to Apply Category-First Naming ✅
 
-**Internal implementation code** (under `curobo/_src/`):
+**Internal implementation code** (under `curobo_floating_base/_src/`):
 ```
-curobo/_src/
+curobo_floating_base/_src/
 ├── geom/
 │   ├── types/
 │   │   ├── primitive_cuboid.py      # category_specific pattern
@@ -68,13 +68,13 @@ curobo/_src/
 
 ### Exemptions: Public API Modules ⚠️
 
-**Public API modules** (under `curobo/`) use **user-friendly, descriptive names** that prioritize:
+**Public API modules** (under `curobo_floating_base/`) use **user-friendly, descriptive names** that prioritize:
 - Developer experience and discoverability
 - Consistency with standard Python library conventions (PyTorch, scikit-learn, HuggingFace)
 - Clear intent over categorical organization
 
 ```
-curobo/
+curobo_floating_base/
 ├── __init__.py
 ├── robot.py                       # NOT kinematics_forward.py
 ├── inverse_kinematics.py          # NOT kinematics_inverse.py
@@ -90,15 +90,15 @@ curobo/
 ```
 
 **Rationale for Public API Exception**:
-1. **User Experience**: `from curobo.inverse_kinematics import InverseKinematics` is more intuitive than `from curobo.kinematics_inverse import InverseKinematics`
+1. **User Experience**: `from curobo_floating_base.inverse_kinematics import InverseKinematics` is more intuitive than `from curobo_floating_base.kinematics_inverse import InverseKinematics`
 2. **Discoverability**: IDE autocomplete works better with descriptive module names
 3. **Standard Practice**: Major Python libraries (torch.optim, sklearn.preprocessing) use descriptive names, not categorical prefixes
-4. **Import Clarity**: Public imports read naturally: "I'm importing inverse kinematics from curobo"
+4. **Import Clarity**: Public imports read naturally: "I'm importing inverse kinematics from curobo_floating_base"
 
 ### Summary
 
 - **Internal code** (`_src/`): Use `category_specific.py` pattern ✅
-- **Public API** (`curobo/` root): Use descriptive, user-friendly names ✅
+- **Public API** (`curobo_floating_base/` root): Use descriptive, user-friendly names ✅
 - **Goal**: Balance internal consistency with external usability
 
 When refactoring existing code or creating new files, always audit and ensure compliance with
